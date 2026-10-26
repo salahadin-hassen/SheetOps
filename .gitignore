@@ -1,0 +1,5 @@
+# Local n8n user folder (M2) and anything secret
+var/
+.env
+*.key.json
+node_modules/

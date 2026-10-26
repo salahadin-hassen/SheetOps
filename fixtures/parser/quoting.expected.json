@@ -1,0 +1,8 @@
+[
+  { "record": 1, "line": 1, "fields": ["sku", "name", "unit", "unit_price"] },
+  { "record": 2, "line": 2, "fields": ["OIL-010", "Sunflower oil, refined 5L", "each", "1,520.00"] },
+  { "record": 3, "line": 3, "fields": ["TEA-002", "Tea \"Gold\" 100 bags", "pack", "95.00"] },
+  { "record": 4, "line": 4, "fields": ["JAM-001", "Strawberry jam\n(glass jar)", "each", "1,250.50"] },
+  { "record": 5, "line": 6, "fields": ["SPC-021", "Pepper, black, \"fine\"", "kg", "12,500"] },
+  { "record": 6, "line": 7, "fields": ["OIL-012", "Palm oil", " refined", "each", "300.00"] }
+]

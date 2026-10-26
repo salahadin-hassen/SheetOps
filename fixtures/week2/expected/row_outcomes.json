@@ -1,0 +1,21 @@
+[
+  { "row": 2, "outcome": "ACCEPTED", "sku": "FLR-001" },
+  { "row": 3, "outcome": "ACCEPTED", "sku": "FLR-002" },
+  { "row": 4, "outcome": "ACCEPTED", "sku": "OIL-010" },
+  { "row": 5, "outcome": "REJECTED", "sku": "SUG-001" },
+  { "row": 6, "outcome": "ACCEPTED", "sku": "COF-100" },
+  { "row": 7, "outcome": "COLLAPSED", "sku": "COF-100" },
+  { "row": 8, "outcome": "HELD_CONFLICT", "sku": "SPC-020" },
+  { "row": 9, "outcome": "HELD_CONFLICT", "sku": "SPC-020" },
+  { "row": 10, "outcome": "HELD_REVIEW", "sku": "TEA-001" },
+  { "row": 11, "outcome": "ACCEPTED", "sku": "LNT-003" },
+  { "row": 12, "outcome": "ACCEPTED", "sku": "HNY-001" },
+  { "row": 13, "outcome": "REJECTED", "sku": "" },
+  { "row": 14, "outcome": "REJECTED", "sku": "OIL-011" },
+  { "row": 15, "outcome": "REJECTED", "sku": "MLK-001" },
+  { "row": 16, "outcome": "BLANK", "sku": "" },
+  { "row": 17, "outcome": "REJECTED", "sku": "" },
+  { "row": 18, "outcome": "HELD_REVIEW", "sku": "EGG-030" },
+  { "row": 19, "outcome": "HELD_REVIEW", "sku": "BTR-002" },
+  { "row": 20, "outcome": "HELD_CONFLICT", "sku": "SUG-001" }
+]

@@ -1,0 +1,19 @@
+{
+  "config": {
+    "supplier": "demo-supplier",
+    "currency": "ETB"
+  },
+  "file": {
+    "id": "drv-week2",
+    "name": "demo-supplier_2026-10-19.csv",
+    "modifiedTime": "2026-10-19T06:00:00.000Z",
+    "createdTime": "2026-10-19T05:58:00.000Z"
+  },
+  "run": {
+    "run_id": "1001",
+    "mode": "scheduled",
+    "started_at": "2026-10-19T07:00:00.000Z",
+    "finished_at": "2026-10-19T07:00:05.000Z",
+    "queue_remaining": 0
+  }
+}

@@ -1,0 +1,20 @@
+Item Code,Description,UOM,Price,Currency
+ flr-001 ,Teff flour,KG,95.00,ETB
+FLR-002,Wheat flour,kg,75.50,ETB
+OIL-010,Sunflower oil 5L,pcs,"1,520.00",ETB
+SUG-001,Sugar,kg,"12,5",ETB
+COF-100,"Coffee beans",kg,850.00,ETB
+COF-100,Coffee  beans,kg,850.00,ETB
+SPC-020,Berbere spice,kg,600.00,ETB
+SPC-020,Berbere spice,kg,650.00,ETB
+TEA-001,Black tea (100 bags),box,210.00,ETB
+LNT-003,Red lentils,kg,140.00,ETB
+HNY-001,Honey,kg,480.00,ETB
+,Mystery item,kg,50.00,ETB
+OIL-011,Palm oil 5L,each,-300.00,ETB
+MLK-001,Powdered milk,kg,390.00,USD
+,,,,
+SLT-9!!,Salt,kg,25.00,ETB
+EGG-030,Eggs (tray of 30),each,420.00,ETB
+BTR-002,Margarine,kg,520.00,ETB
+SUG-001,Sugar,kg,115.00,ETB

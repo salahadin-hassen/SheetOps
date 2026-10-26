@@ -1,0 +1,13 @@
+{
+  "name": "sheetops",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Supplier price-list reconciliation for Google Sheets, orchestrated by n8n",
+  "license": "UNLICENSED",
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
