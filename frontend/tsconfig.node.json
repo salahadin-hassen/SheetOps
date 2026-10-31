@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts", "src/security.test.ts", "src/styles/contrast.test.ts"],
+  "exclude": []
+}

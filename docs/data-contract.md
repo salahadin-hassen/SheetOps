@@ -1,6 +1,36 @@
 # SheetOps data contract
 
-Version 2.1 (approved design v2 plus the four corrections from the M1 review).
+Version 2.5. Changes since the approved v2.1, all made while building the n8n
+workflow (M2):
+
+- v2.2: the Review guard is a read order instead of a second read before
+  publishing; two pre-download checks (`NOT_A_CSV_FILE`, listed size); Sheets
+  date serials are read as dates.
+- v2.3 (review of v2.2):
+  - **Failure contract** (section 12): the run row's exact range; a read
+    before every overwrite; `FAILED` only after a definitive failure; after
+    a lost response, this run never writes a failure status.
+  - **`QUEUE_TOO_LARGE`** replaces `INBOX_TOO_LARGE` and `LISTING_INCOMPLETE`,
+    with recovery steps (section 2).
+  - **Review race** stated as a possible loss (section 8).
+  - **Sheets read options** and the date convention stated (section 10).
+- v2.4 (review of v2.3): **replay-safe publication** (section 12):
+  - every publish carries a version check, so a publish planned from an
+    older state can never apply;
+  - history rows go to fixed ranges instead of being appended;
+  - no other batch is published while a publication is unresolved
+    (section 2, `PUBLICATION_UNRESOLVED`);
+  - automatic recovery of an unresolved publication is **off by default**:
+    the age of a `STARTED` row is never treated as evidence (section 2).
+- v2.5 (owner decision, 29 October 2026): **final Review check**
+  (section 8). This reverses the v2.2 choice, confirmed on 27 October 2026, of
+  a read order without a second read. Just before every publish that rewrites
+  Review, the workflow reads Review again (step 6a, section 12). If any
+  operator decision or note differs from the read the plan was built from, or
+  the read fails, nothing is published and the run ends `FAILED`
+  (`REVIEW_CHANGED` or `REVIEW_READ_FAILED`). The check shortens the window in
+  which an edit can be lost; it does not close it.
+
 Scope of version one: one supplier, one currency (ETB), one Google Drive inbox
 folder, one spreadsheet.
 
@@ -39,14 +69,62 @@ key fields, so this works even after the file has left the inbox.
 
 **Scheduled selection.** One batch per run. First matching rule wins:
 
-1. More than 50 files listed → `BLOCKED` (`INBOX_TOO_LARGE`).
+1. The listing is not known to be complete → `BLOCKED` (`QUEUE_TOO_LARGE`).
+   This happens when more than 50 files are listed, or when Drive returns the
+   listing in more than one page. SheetOps never processes a partial listing
+   or skips files silently, because a missing file could be older than the
+   ones it can see. Recovery (the message names the case):
+   - more than 50 files: move processed files (those with a committed or
+     `REJECTED_FILE` row in Run Log) from the inbox to another folder until
+     at most 50 remain, then run again;
+   - more than one page with 50 files or fewer: Drive may split a listing
+     early, so run again; if it persists, reduce the inbox as above.
 2. Any `STARTED` run row younger than 15 minutes → `WAIT` (nothing written).
-3. Malformed names: every version whose name fails section 1 and that has no
-   `REJECTED_FILE` row yet is reported, oldest first by
-   `(modified_at, created_at, file_id)`. Code `BAD_FILENAME`, or
-   `WRONG_SUPPLIER` when only the supplier part is wrong. The file is not
-   downloaded. Each malformed version is reported exactly once and never blocks
-   the queue.
+   A `STARTED` row 15 minutes or older is an **unresolved publication**. Its
+   age shows only that no run is still active: n8n stops every run after 300
+   seconds. It does not show whether the publish was never sent, was
+   rejected, or applied with a lost response. An applied publish shows its
+   commit marker instead of `STARTED`, but a delayed one could still land
+   later. While an unresolved publication exists, no other batch is
+   published:
+   - **By default** (`auto_recover_uncertain` off), scheduled runs stop:
+     `BLOCKED` (`PUBLICATION_UNRESOLVED`). Only a manual run with that row's
+     `target_batch_id` may process it. A person runs it after inspecting the
+     evidence (docs/setup.md, "An unresolved publication").
+   - **With `auto_recover_uncertain` on**, scheduled runs process only that
+     batch version, by these rules applied to it alone:
+     - its pre-download check fails → `REJECTED_FILE` again;
+     - it has a `HALTED_REVIEW` row → `BLOCKED` (`BATCH_HALTED`);
+     - it has 3 or more failed attempts → `BLOCKED` (`RETRY_LIMIT`);
+     - it is older than the latest committed batch → `REJECTED_FILE`
+       (`OUT_OF_ORDER_FILE`);
+     - otherwise → process it again (as a reprocess if it is committed).
+
+   In both modes:
+   - If that version is no longer in the inbox, or more than one batch is
+     unresolved → `BLOCKED` (`PUBLICATION_UNRESOLVED`).
+   - A manual run is refused (`PUBLICATION_UNRESOLVED`) unless it targets that
+     batch.
+   - The publish that processes it marks the old row `INTERRUPTED` and moves
+     the version (section 12). After that, the old publish can no longer
+     apply. That last point is documented Google behavior, which the live
+     tests T-VERSION-1 and T-VERSION-2 must confirm.
+
+   **Switching automatic recovery on** makes scheduled runs repeat an
+   uncertain publication without a person. They then rely on the version check
+   to reject the original if it lands later. Switch it on only after
+   T-VERSION-1 and T-VERSION-2 pass live; keep it off if they fail.
+3. Pre-download checks: every version that fails one of these, and has no
+   `REJECTED_FILE` row yet, is reported, oldest first by
+   `(modified_at, created_at, file_id)`. The file is not downloaded. Each
+   version is reported exactly once and never blocks the queue.
+
+   | Code | Condition |
+   |---|---|
+   | `NOT_A_CSV_FILE` | A Google-native file (Docs, Sheets, ...), which cannot be downloaded as an uploaded CSV |
+   | `BAD_FILENAME` | The name fails section 1 (pattern or calendar date) |
+   | `WRONG_SUPPLIER` | Only the supplier part is wrong |
+   | `FILE_TOO_LARGE` | Drive lists the file above the byte limit |
 4. Well-named versions in order-key order, skipping committed and rejected ones:
    - order key **less than** the latest committed key → `REJECTED_FILE`
      (`OUT_OF_ORDER_FILE`). An older effective date, or an older version of
@@ -61,7 +139,8 @@ rows older than 15 minutes. A stale `STARTED` row is marked `INTERRUPTED` by
 the next publishing run.
 
 **Blocking is deliberate.** SheetOps never processes a newer file while an
-older, parseable version still needs a decision. The operator unblocks the
+older, parseable version still needs a decision, and never publishes any
+other batch while a publication is unresolved. The operator unblocks the
 queue with a manual override or retry run, or by removing the file from the
 inbox.
 
@@ -73,8 +152,9 @@ inbox.
 | `reprocess_latest` | Process the latest committed batch again (used to apply approvals immediately). |
 | `confirm_mass_discontinue` | With a target: accept the disappearance check for that run only. |
 
-A manual run is refused (nothing written; the reason appears in n8n) when the
-target is not in the inbox, has a malformed name, was rejected, or has an
+A manual run is refused (nothing written; the reason appears in n8n) when a
+different batch's publication is unresolved, when the target is not in the
+inbox, fails a pre-download check, was rejected, or has an
 order key less than the latest committed key.
 
 ## 3. CSV parsing
@@ -221,13 +301,47 @@ Items are matched by `review_id`, never by row position, so sorting the tab is
 safe.
 
 - **Restriction.** Do not edit the Review tab while a run is active (Run Log
-  shows a `STARTED` row). An edit made after the run read the tab would be
-  overwritten.
-- **Guard.** Just before publishing, the workflow reads the Review tab again.
-  If any `decision` or `note` changed, or rows were added or removed, the run
-  aborts with `REVIEW_EDITED_DURING_RUN` and publishes nothing. The next run
-  picks up the edit. This narrows the race to the moment between the second
-  read and the publish request; it does not remove it.
+  shows a `STARTED` row).
+- **Read order.** The workflow reads Catalog, Review and the ID columns only
+  after the download, immediately before planning (step 6). Edits saved
+  before that read are kept.
+- **Final check (v2.5).** After planning, and immediately before the publish,
+  the workflow reads the Review tab again (step 6a, the same range as step 6)
+  and compares it with the step 6 read the plan was built from:
+  - Items are matched by `review_id` (trimmed). Row order does not matter;
+    blank rows are ignored; missing trailing cells read as empty, as in
+    step 6.
+  - For every item, `decision` and `note` must be identical: the same value
+    and the same type (the number `5` and the text `"5"` differ; so do `""`
+    and `" "`).
+  - The set of review IDs must be the same: an item added, removed or listed
+    twice is a change. A header or managed-column problem in the final read
+    is a change.
+  - Managed columns are not compared: the publish rewrites them anyway.
+  - If anything differs, nothing is published and the run ends `FAILED`
+    (`REVIEW_CHANGED`, naming the items and fields). If the final read fails
+    after its three tries, or returns no usable rows, the run ends `FAILED`
+    (`REVIEW_READ_FAILED`). Both are definitive failures: nothing was sent, so
+    `FAILED` is written after step 8 confirms this run's row (section 12).
+    The operator's edit stays in the sheet, untouched.
+  - Like any `FAILED` run, it counts as a failed attempt (section 2). A batch
+    that is not yet committed is processed again by the next scheduled run,
+    which plans from the new values; three failed attempts block it
+    (`RETRY_LIMIT`). A manual reprocess of a committed batch is not repeated
+    automatically: run it again.
+  - Runs whose plan does not write Review (`REJECTED_FILE`, `HALTED_REVIEW`)
+    skip the check: their publish cannot overwrite a decision.
+- **Remaining loss.** An edit saved between the final read and Google
+  applying the publish **may still be lost**: the publish rewrites the Review
+  rows from the step 6 read. The item then shows the decision and note it had
+  before the edit; nothing is applied on the strength of a lost edit, and the
+  operator must type it again. The final check makes this window shorter (the
+  planning time is no longer inside it); it does not close it, and it cannot:
+  Google Sheets has no conditional write, and Google documents that a
+  `batchUpdate` "may be altered with respect to collaborator changes".
+  Evidence: `simulate.test.js` injects an approval after the final read and
+  checks that it is lost and not applied, and injects one before the final
+  read and checks that the run aborts without publishing.
 - Runs that end `REJECTED_FILE` or `HALTED_REVIEW` do not write the Review tab
   at all.
 
@@ -254,6 +368,25 @@ Header rows must match these columns exactly, in this order. Extra columns are
 refused (`OUTPUT_SCHEMA_MISMATCH`) because SheetOps re-sorts managed rows and
 would misalign them. Values are written as text (`stringValue`) or numbers
 (`numberValue`); text is never interpreted as a formula.
+
+**Reading the tabs back.** Every Sheets read uses
+`valueRenderOption=UNFORMATTED_VALUE` and `dateTimeRenderOption=SERIAL_NUMBER`.
+Cells therefore arrive as stored, not as displayed: text as strings, numbers as
+JSON numbers, and date cells as Sheets serial day numbers. SheetOps writes
+dates as text, so serials appear only where a person typed or pasted a date
+into a tab that was not formatted as plain text. Date columns in Catalog
+(`first_seen`, `last_seen`, `last_changed`) and Review (`first_seen`,
+`last_seen`) accept both forms:
+
+| Cell value | Read as |
+|---|---|
+| Text `YYYY-MM-DD` that is a real calendar date | that date |
+| A whole number from 1 to 2958465 | the date that many days after 1899-12-30 (Google Sheets' epoch): 1 = 1899-12-31, 61 = 1900-03-01, 46300 = 2026-10-05, 2958465 = 9999-12-31 |
+| Anything else, including fractions (date-times such as 46300.5), 0, negatives and digit strings such as `"46300"` | refused: `CATALOG_INVALID` or `REVIEW_INVALID` |
+
+Only the date columns of those two tabs accept serials. Run Log
+timestamps and dates are always written as text with `RAW` and must stay
+text.
 
 **Catalog** (replaced in full, sorted by sku):
 `sku, name, unit, unit_price, currency, status, previous_price, first_seen,
@@ -306,8 +439,8 @@ queue_remaining, error_code, error_message`
 | `SUCCESS_WITH_EXCEPTIONS` | Inside the publish request: published, items need attention | **yes** |
 | `REJECTED_FILE` | Inside the publish request: the file was not processed | no (closed) |
 | `HALTED_REVIEW` | Inside the publish request: more than 30% of active SKUs absent | no (blocks the queue) |
-| `FAILED` | Separate write after a definitive failure | no |
-| `INTERRUPTED` | Set by a later publishing run on a stale `STARTED` row | no |
+| `FAILED` | Separate write by this run, only after a **definitive** failure (section 12) | no |
+| `INTERRUPTED` | Set by a later publishing run on a `STARTED` row 15 minutes or older, including a run whose publish outcome stayed unknown. It records that a later publish superseded the attempt, not that the attempt failed | no |
 | `BLOCKED` | Single appended row; nothing processed | no (no batch) |
 
 `IDLE`, `WAIT` and refused manual runs write nothing to the spreadsheet.
@@ -319,78 +452,283 @@ A halted run publishes exactly one Exceptions row (`MASS_DISCONTINUE`,
 severity REVIEW, raw value `numerator/denominator`, the missing SKUs in the
 message) and the Run Log row. Catalog, Review and Changes are not written.
 
-## 12. Publication
+## 12. Google requests and publication
 
-Each processing run publishes through **one** `spreadsheets.batchUpdate`
-request. Google documents that every request in it is validated first, that
-nothing is applied if any request is invalid, and that the updates are applied
-together atomically, in order. This is documented behavior; the M2 live tests
-verify it on the SheetOps sheet.
+**Calls in a processing run, in order.** All go through n8n HTTP Request nodes
+with the Google Service Account credential; URLs come from
+`buildGoogleRequests` and `buildRunRowRequests`.
+
+| Step | Call | Retries | If it fails |
+|---|---|---|---|
+| 1 | Drive `files.list` of the inbox (up to 51 entries, one page) | 3 tries, 5 s apart | Run stops; nothing written |
+| 2 | Sheets `values.get` of Run Log | 3 tries | Run stops; nothing written |
+| 3 | Sheets `values.append` of the `STARTED` row (`RAW`, `INSERT_ROWS`) | **none** (an append is not idempotent) | Run stops; a row may exist and is later marked `INTERRUPTED` |
+| 4 | Drive `files.get?alt=media` (processing runs only) | 3 tries | Definitive failure `DOWNLOAD_FAILED` |
+| 5 | Sheets `spreadsheets.get`: tab IDs, grid sizes and the version (the sheet ID of `_sheetops_version`) | 3 tries | Definitive failure `READ_FAILED` |
+| 6 | Sheets `values.batchGet`: Catalog, Review, the Changes and Exceptions header rows and ID columns, and Run Log | 3 tries | Definitive failure `READ_FAILED` |
+| 6a | Sheets `values.get` of Review, the final check (section 8); only when the plan writes Review | 3 tries | Definitive failure `REVIEW_READ_FAILED`; a changed decision or note is `REVIEW_CHANGED` |
+| 7 | Sheets `spreadsheets.batchUpdate`: the publish | **none** | See "After a publish error" |
+
+After a failure, up to two more calls follow:
+
+| Step | Call | Retries | If it fails |
+|---|---|---|---|
+| 8 | Sheets `values.get` of this run's row | 3 tries | Nothing is written; the row stays `STARTED` |
+| 9 | Sheets `values.update` (`RAW`) of this run's row with `FAILED`, after definitive failures only | 3 tries (rewriting the same values is idempotent) | The n8n execution fails; the row stays `STARTED` |
+
+`BLOCKED` runs make calls 1, 2 and one `values.append` of their final row.
+Values written with `RAW` are stored as given, never parsed as formulas. Every
+read uses the render options in section 10.
+
+**This run's row.** Step 3 appends the `STARTED` row. Google's reply names the
+range it wrote (`updates.updatedRange`), which must be exactly one row,
+`'Run Log'!A<n>:Z<n>` with n ≥ 2; anything else stops the run
+(`RUNLOG_INVALID`). From then on, every write to this run's row covers
+exactly columns A–Z (the 26 Run Log columns) of row n:
+
+| Write | Range | Checked against | If the check fails |
+|---|---|---|---|
+| Commit marker, inside the publish | `updateCells` on the Run Log sheet, `startRowIndex` n−1, `endRowIndex` n, columns 0–26 | Step 6, read seconds earlier | Nothing is published (`RUN_ROW_UNVERIFIED`) |
+| `FAILED` | `values.update` of `'Run Log'!A<n>:Z<n>` | Step 8, read just before | Nothing is written |
+
+Each check requires row n to show this run's `run_id`, this `batch_id` and
+`STARTED`. Appends by other runs never move existing rows. Sorting, inserting
+or deleting Run Log rows during a run can, so the checks ensure such an edit
+can at worst prevent this run's own final write. SheetOps never overwrites
+another run's row. Stale `STARTED` rows due to be marked `INTERRUPTED` are
+checked against step 6 in the same way; a row that has moved is skipped this
+time and handled by a later run.
+
+**One authoritative final status per run.** A run's row changes at most once,
+from `STARTED` to a final status. Only these writers can make that change:
+
+| Final status | Written by | Only when |
+|---|---|---|
+| `SUCCESS`, `SUCCESS_WITH_EXCEPTIONS`, `REJECTED_FILE`, `HALTED_REVIEW` | this run's publish (the commit marker) | Google applies the publish |
+| `FAILED` | this run, step 9 | the failure is definitive and step 8 shows the row still `STARTED` |
+| `INTERRUPTED` | a later run's publish | the row is still `STARTED` at least 15 minutes after it started, checked in that run's step 6 |
+| `BLOCKED` | the append itself | the run was blocked before processing |
+
+No write ever replaces a final status: each one replaces a row just checked
+to be `STARTED`.
+
+**Publication.** Each processing run publishes through **one**
+`spreadsheets.batchUpdate` request. The official reference (checked
+2026-10-27) documents:
+
+- "Each request is validated before being applied."
+- "If any request is not valid then the entire request will fail and nothing
+  will be applied."
+- "Requests will be applied in the order they are specified."
+- "it is guaranteed that the updates in the request will be applied together
+  atomically."
+
+It also warns that "your changes may be altered with respect to collaborator
+changes". It does not say how two concurrent API requests interact, and it
+has no conditional-write option. SheetOps relies on the documented behavior;
+the M2 live tests check it on the SheetOps sheet.
+
+**The version check.** Atomicity alone does not make recovery safe: a publish
+that lands late is still applied, whole, on top of whatever was published in
+the meantime. Every publish therefore carries a version check:
+
+- The spreadsheet holds one hidden tab, `_sheetops_version`, with one cell.
+  Its **sheet ID is the state version**. SheetOps creates it on the first
+  publish.
+- Step 5 reads the version (the sheet ID of that tab, or none). It is read
+  **before** the tabs in step 6, so a plan is never older than the version it
+  carries.
+- The publish starts with `deleteSheet` of that ID (when there is one) and
+  `addSheet` of the tab with a new ID. If the tab with the planned ID no
+  longer exists, or the title is already taken, Google rejects the whole
+  request and nothing in it is applied.
+- The new ID is the larger of (old ID + 1) and (1,000,000,000 + seconds since
+  2026-01-01 at this run's start). IDs therefore only grow, even if the tab is
+  deleted by hand, and an old ID is never recreated.
+
+So a publish that lands after another publish has applied is rejected. This
+rests on the documented validation, plus one inference: that `deleteSheet` of
+a missing sheet ID counts as an invalid request. That two publishes planned
+from the same version cannot both apply when they arrive **concurrently** is
+not documented at all. It also assumes Google applies them one after the
+other and validates each against the state it lands on. Only the live test
+T-VERSION-2 can show it.
 
 Request order:
 
-1. Grow the Catalog and Review grids if needed (`appendDimension`).
-2. Replace the Catalog data rows (`updateCells`; cells not covered are cleared).
-3. Replace the Review data rows.
-4. Append new Changes rows (`appendCells`).
-5. Append new Exceptions rows.
-6. Mark stale `STARTED` rows `INTERRUPTED`.
-7. Overwrite this run's `STARTED` row with its final row — the **commit marker**.
+1. The version check (`deleteSheet`, `addSheet`).
+2. Grow grids where needed (`appendDimension`).
+3. Replace the Catalog data rows (`updateCells`; cells not covered are cleared).
+4. Replace the Review data rows.
+5. Write new Changes rows at a fixed range (`updateCells`).
+6. Write new Exceptions rows at a fixed range.
+7. Mark stale `STARTED` rows `INTERRUPTED`.
+8. Overwrite this run's `STARTED` row with its final row: the **commit marker**.
 
-The core checks the complete plan before building the request: unique IDs, no
-already-existing IDs, row accounting, row limits, and a request size of at most
-2,000,000 bytes (`PUBLISH_TOO_LARGE`). Failures abort before anything is sent.
+**Fixed ranges, not appends.** New Changes and Exceptions rows go to the rows
+directly below the last row the step-6 ID-column read returned, with an
+explicit range; `appendCells` is not used. Every write in the request is
+therefore a function of the plan and the rows read. Sending the same request
+twice rewrites the same cells instead of adding rows. The plan records these
+start rows (`next_rows`). Rows below the last ID in column A belong to
+SheetOps and may be overwritten.
 
-**After a publish error** (never retried automatically):
+Before building the request, the core checks the complete plan:
 
-| Error | Classification | Action |
+- unique IDs, with none already present in the tabs;
+- row accounting and row limits;
+- a request size of at most 2,000,000 bytes (`PUBLISH_TOO_LARGE`).
+
+If any check fails, nothing is sent.
+
+**Definitive and unknown failures.**
+
+| Failure | Classification | Action |
 |---|---|---|
-| HTTP 4xx except 408 | Definitive rejection: nothing was applied | Update the run row to `FAILED` |
-| HTTP 5xx, 408, timeout, connection lost | Unknown outcome | Reconcile (below) |
+| Steps 4–6 fail, the plan is refused (for example `CATALOG_INVALID`), or the final Review check fails (step 6a) | Definitive: nothing was sent | Steps 8 and 9: `FAILED` with that code |
+| Publish answered with HTTP 4xx, except 408 | Definitive: Google refused it, nothing was applied | Steps 8 and 9: `FAILED` (`PUBLISH_REJECTED`) |
+| Publish answered with HTTP 5xx or 408, timed out, or lost the connection | **Unknown**: the request may have been applied, or may still be applied later | Reconcile (below). This run **never** writes a failure status. |
 
-**Reconciling an unknown outcome.** Wait about 20 seconds, then read this
-run's row:
+A publish error is never retried automatically.
 
-| Run row shows | Meaning | Action |
-|---|---|---|
-| `SUCCESS` / `SUCCESS_WITH_EXCEPTIONS` for this batch | Published | Report success. **Never** write `FAILED`. |
-| `STARTED` | Not applied (the marker is part of the atomic request) | Update the row to `FAILED` (`PUBLISH_NOT_APPLIED`) |
-| Row missing or unreadable | Inconclusive | Write nothing. The row stays `STARTED`; after 15 minutes the next run treats it as interrupted and retries. |
+**Reconciling an unknown outcome.** Wait 20 seconds, then read this run's row
+(step 8). The commit marker is part of the atomic publish, so the row shows
+the final status if and only if the publish has been applied.
 
-Residual risk: if a delayed request lands between the reconcile read and the
-`FAILED` write, the run row can show `FAILED` although the data was published.
-The next run then reprocesses the batch; because IDs are filtered, it adds no
-duplicates and commits the batch again.
+| Row n shows | Meaning | This run writes | The n8n execution reports |
+|---|---|---|---|
+| this run, this batch, and the final status the plan built | Applied | nothing | that status |
+| `STARTED` | Not applied **so far** | nothing | `PUBLISH_OUTCOME_UNKNOWN` |
+| unreadable, empty, or another run | Not known | nothing | `PUBLISH_OUTCOME_UNKNOWN` |
+
+**Why nothing is written after an unknown outcome.** Sheets has no conditional
+write. Suppose this run wrote `FAILED` and a delayed publish landed just before
+that write. `FAILED` would then overwrite a committed status, and the run row
+would contradict the data.
+
+Instead, the row stays `STARTED`. The n8n execution record keeps the
+`PUBLISH_OUTCOME_UNKNOWN` code, the HTTP status or network error, and the row
+read. The next run decides from the Run Log it reads at that time:
+
+- If the row now shows the final status, the batch is committed and there is
+  nothing to do.
+- If the row still shows `STARTED`, the publication is unresolved
+  (section 2). By default, scheduled runs block until a person, having
+  inspected the evidence, reprocesses the batch explicitly. With automatic
+  recovery on, a run 15 minutes or more later processes it again. Either way,
+  the reprocess marks the old row `INTERRUPTED` inside its own publish.
+
+**Recovery.** A recovery run processes the same batch version (section 2),
+downloads the same file version, reads the same state, and plans from the same
+version. Unless someone edited Review in between, its data writes (Catalog,
+Review, Changes, Exceptions) are byte-identical to the original's. Only the
+Run Log writes and the new version ID differ. Each publication has one fixed
+Run Log destination, its own run's row. Both publications delete the same
+version, so at most one of them applies:
+
+| What happens | Result |
+|---|---|
+| The original landed before the recovery's step 5 | The row shows the final status; the batch is committed; no recovery runs |
+| The original lands after the recovery's step 5 but before its publish | The original applies; the recovery is rejected (HTTP 400) and writes `FAILED` (`PUBLISH_REJECTED`) on its own row |
+| The original lands after the recovery committed | The original is rejected; the old row stays `INTERRUPTED` |
+| The original never lands | The recovery's publish is the only one |
+
+**Guarantees.** The labels below separate three kinds of support:
+
+- **Documented:** follows from the quoted reference text, plus at most the
+  stated inference.
+- **Undocumented:** depends on behavior the reference does not describe;
+  only a live test can show it.
+- **Unconditional:** holds whatever Google does.
+
+None of this has been observed live yet.
+
+1. *At most one publish per version applies.*
+   - Sequentially, a publish that lands after another one applied changes
+     nothing: documented, with the `deleteSheet` inference (T-VERSION-1).
+   - For concurrent publishes: undocumented (T-VERSION-2).
+2. *No duplicate history rows, no stale overwrite* (as guarantee 1). Every applied
+   publish was planned from the state it lands on, and the plan filters out
+   IDs already present, so no ID is written twice. Catalog and Review are
+   never replaced by an older snapshot.
+3. *Replaying an identical request adds no rows* (unconditional). Even if
+   Google applied both the original and an identical recovery,
+   Changes and Exceptions would contain each row once. Run Log would then show
+   two committed rows for the batch. The offline test with the check switched
+   off shows exactly that.
+4. *One authoritative status per run* (documented). The commit marker is in the
+   same atomic request as the data, so a run's row shows a committed status
+   exactly when its publish applied.
+5. *Order* (unconditional). No other batch is published while a publication is
+   unresolved.
+
+**Not guaranteed.**
+
+- Exactly-once *processing*: a batch can be downloaded, planned and sent more
+  than once. Guarantees 1 and 2 make its data appear in the tabs once.
+- Edits by people. A Review edit inside the read-to-publish window may be
+  lost (section 8). Rows typed by hand into managed tabs are not versioned.
+  Editing, renaming or deleting `_sheetops_version` by hand is detected at
+  the next publish or makes it fail safely, but the tab should not be touched.
+- Progress without a person: an unresolved publication can block the queue
+  until someone acts (`PUBLICATION_UNRESOLVED`, `RETRY_LIMIT`).
+- Guarantees 1, 2 and 4 until T-VERSION-1 and T-VERSION-2 pass live. Until
+  then, automatic recovery stays off (the default), and an unresolved
+  publication blocks (`PUBLICATION_UNRESOLVED`) until a person decides. If
+  Google does not enforce the check, it must stay off. Even an explicit
+  reprocess then carries the risk described in docs/setup.md. Guarantee 3
+  still holds.
+
+**Cost.** After an unknown outcome, the row reads `STARTED`, and no other
+batch is published, until a person reprocesses it after inspecting the
+evidence (by default), or until a run 15 minutes or more later recovers it
+(with automatic recovery on).
 
 ## 13. Failure policy
 
 | Situation | Spreadsheet writes | Catalog | Status |
 |---|---|---|---|
 | Nothing to process | none (n8n execution record only) | unchanged | IDLE |
-| Malformed name, wrong supplier, out of order | one request: Exceptions row + run row | unchanged | REJECTED_FILE |
+| Settings still hold placeholders or invalid IDs | none (n8n execution record only) | unchanged | — |
+| Listing or Run Log read fails | none (n8n execution record only) | unchanged | — |
+| More than 50 files listed, or the listing has more than one page | one append: the run row | unchanged | BLOCKED (`QUEUE_TOO_LARGE`) |
+| An unresolved publication whose file version left the inbox, or several unresolved | one append: the run row | unchanged | BLOCKED (`PUBLICATION_UNRESOLVED`) |
+| A publish planned from a version that has moved on (lost race) | nothing from the request; run row `FAILED` | unchanged by this run | FAILED (`PUBLISH_REJECTED`) |
+| Pre-download check fails, or out of order | one request: Exceptions row + run row | unchanged | REJECTED_FILE |
 | Unreadable CSV, empty, too large, too many rows, missing or ambiguous column | one request: Exceptions row(s) + run row | unchanged | REJECTED_FILE |
 | More than 30% of active SKUs absent | one request: Exceptions row + run row | unchanged | HALTED_REVIEW |
-| Catalog, Review or Run Log tab invalid | run row `FAILED`, if writable | unchanged | FAILED |
-| Review edited during the run | run row `FAILED` | unchanged | FAILED |
-| Publish rejected | nothing from the request; run row `FAILED` | unchanged | FAILED |
-| Publish outcome unknown | all or nothing; reconciled as in section 12 | all or nothing | SUCCESS* or FAILED or STARTED |
+| Download or tab read fails after `STARTED` | run row `FAILED`, once step 8 confirms the row | unchanged | FAILED |
+| Catalog, Review or Run Log tab invalid | run row `FAILED`, once step 8 confirms the row | unchanged | FAILED |
+| A Review decision or note changed after the tab read, or the final Review read failed (step 6a) | run row `FAILED`, once step 8 confirms the row; no publish is sent | unchanged | FAILED (`REVIEW_CHANGED`, `REVIEW_READ_FAILED`) |
+| Publish rejected (4xx except 408) | nothing from the request; run row `FAILED`, once step 8 confirms the row | unchanged | FAILED |
+| Publish outcome unknown | all of the request or none of it; **no failure status** | all or nothing | the final status if applied; otherwise `STARTED`, later `INTERRUPTED` (n8n: `PUBLISH_OUTCOME_UNKNOWN`) |
+| This run's row moved or cannot be confirmed (Run Log edited during the run, or step 8 failed) | none after the failure | unchanged | `STARTED`, later `INTERRUPTED` (n8n: `RUN_ROW_UNVERIFIED`) |
 | Spreadsheet unwritable (403, deleted, quota) | probably nothing, **including Run Log** | unchanged | **n8n execution record only** |
 
 SheetOps cannot always record its own failure in the spreadsheet. The n8n
-execution record is the fallback diagnostic source, so n8n must keep saving
-failed executions.
+execution record is the fallback diagnostic source. The workflow therefore
+saves every execution (`saveDataSuccessExecution` and
+`saveDataErrorExecution` are `all`), and the final **Done** node reports
+`run_status`, `code` and `message` for every path. n8n prunes saved executions
+after 14 days by default (`EXECUTIONS_DATA_MAX_AGE`).
 
 ## 14. Code reference
 
-- File level: `BAD_FILENAME`, `WRONG_SUPPLIER`, `OUT_OF_ORDER_FILE`,
-  `CSV_PARSE_ERROR`, `FILE_EMPTY`, `FILE_TOO_LARGE`, `TOO_MANY_ROWS`,
-  `MISSING_COLUMN`, `AMBIGUOUS_COLUMN`, `MASS_DISCONTINUE`.
+- File level: `NOT_A_CSV_FILE`, `BAD_FILENAME`, `WRONG_SUPPLIER`,
+  `OUT_OF_ORDER_FILE`, `CSV_PARSE_ERROR`, `FILE_EMPTY`, `FILE_TOO_LARGE`,
+  `TOO_MANY_ROWS`, `MISSING_COLUMN`, `AMBIGUOUS_COLUMN`, `MASS_DISCONTINUE`.
 - Row level: `FIELD_COUNT_MISMATCH`, `MISSING_SKU`, `INVALID_SKU`,
   `MISSING_NAME`, `NAME_TOO_LONG`, `MISSING_UNIT`, `UNKNOWN_UNIT`,
   `MISSING_PRICE`, `INVALID_PRICE`, `AMBIGUOUS_PRICE`, `CURRENCY_MISMATCH`,
   `DUPLICATE_COLLAPSED`, `CONFLICTING_DUPLICATE`, `SIBLING_ROW_INVALID`.
 - Review reasons: `UNIT_CHANGED`, `LARGE_PRICE_CHANGE`, `NAME_CHANGED`.
-- Run level: `INBOX_TOO_LARGE`, `BATCH_HALTED`, `RETRY_LIMIT`,
-  `INVALID_LISTING`, `CATALOG_INVALID`, `REVIEW_INVALID`, `RUNLOG_INVALID`,
-  `OUTPUT_SCHEMA_MISMATCH`, `REVIEW_EDITED_DURING_RUN`, `PUBLISH_TOO_LARGE`,
-  `PLAN_INVALID`, `PUBLISH_REJECTED`, `PUBLISH_NOT_APPLIED`.
+- Run level: `QUEUE_TOO_LARGE`, `PUBLICATION_UNRESOLVED`, `BATCH_HALTED`, `RETRY_LIMIT`,
+  `SETTINGS_INVALID`, `INVALID_LISTING`, `READ_FAILED`, `DOWNLOAD_FAILED`,
+  `CATALOG_INVALID`, `REVIEW_INVALID`, `RUNLOG_INVALID`,
+  `OUTPUT_SCHEMA_MISMATCH`, `PUBLISH_TOO_LARGE`, `PLAN_INVALID`,
+  `PUBLISH_REJECTED`, `REVIEW_CHANGED`, `REVIEW_READ_FAILED`.
+- Not written to the spreadsheet (shown in n8n only): `RUN_IN_PROGRESS`
+  (WAIT), `PUBLISH_OUTCOME_UNKNOWN`, `RUN_ROW_UNVERIFIED`, and the manual-run
+  refusals `NOTHING_COMMITTED`,
+  `TARGET_NOT_IN_INBOX`, `TARGET_PRECHECK_FAILED`, `TARGET_REJECTED`,
+  `TARGET_OUT_OF_ORDER`.

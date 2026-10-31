@@ -5,7 +5,9 @@
   "description": "Supplier price-list reconciliation for Google Sheets, orchestrated by n8n",
   "license": "UNLICENSED",
   "scripts": {
-    "test": "node --test \"test/**/*.test.js\""
+    "test": "node --test \"test/**/*.test.js\"",
+    "build:workflow": "node workflow/build.js",
+    "verify:n8n": "node scripts/verify-in-n8n.js"
   },
   "engines": {
     "node": ">=22"

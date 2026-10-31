@@ -6,7 +6,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  core, week2, week2Input, afterWeek2State, sheetState, makeBatch, tableValues, WEEK2_BATCH_ID,
+  core, week2, week2Input, afterWeek2State, sheetState, makeBatch, WEEK2_BATCH_ID,
 } = require('./support/helpers.js');
 
 const w = week2();
@@ -189,15 +189,71 @@ test('a hand-edited proposal from the same batch is refused as REVIEW_INVALID', 
   );
 });
 
-test('detectReviewEdits finds edited, added and removed rows, and ignores sorting', () => {
-  const initial = tableValues(core.REVIEW_COLUMNS, w.expected.review);
-  const same = tableValues(core.REVIEW_COLUMNS, w.expected.review.slice().reverse());
-  assert.deepEqual(core.detectReviewEdits(initial, same), { edited: false, items: [] });
+test('sorting the Review tab by hand does not change the result', () => {
+  const sorted = afterWeek2State({ 'TEA-001': { note: 'checked' } });
+  sorted.review = [sorted.review[0]].concat(sorted.review.slice(1).reverse());
+  const plan = core.processBatch(Object.assign(week2Input(), { sheet: sorted }));
+  assert.deepEqual(plan.writes.review.map((r) => [r.sku, r.note]), [['BTR-002', ''], ['EGG-030', ''], ['TEA-001', 'checked']]);
+});
 
-  const decided = tableValues(core.REVIEW_COLUMNS, w.expected.review.map((r) => (r.sku === 'TEA-001' ? Object.assign({}, r, { decision: 'APPROVE' }) : r)));
-  assert.deepEqual(core.detectReviewEdits(initial, decided), { edited: true, items: [{ review_id: rid('TEA-001'), change: 'EDITED' }] });
+// §8 (v2.5): the final Review check, just before the publish. Every operator
+// decision and note must equal the values the plan was built from.
+const reviewValues = (rows) => [Array.from(core.REVIEW_COLUMNS)].concat(rows.map((row) => core.rowToValues(core.REVIEW_COLUMNS, row)));
+const finalRead = (values) => ({ range: "'Review'!A1:P", majorDimension: 'ROWS', values });
+const withField = (sku, field, value) => w.expected.review.map((r) => (r.sku === sku ? Object.assign({}, r, { [field]: value }) : r));
+const plannedReview = reviewValues(withField('TEA-001', 'decision', 'APPROVE'));
+const checkFinal = (values) => core.checkReviewUnchanged({ planned: plannedReview, finalRead: finalRead(values) });
+const changed = (pattern) => (err) => err.code === 'REVIEW_CHANGED' && pattern.test(err.detail) && /Nothing was published/.test(err.detail);
 
-  const removed = tableValues(core.REVIEW_COLUMNS, w.expected.review.filter((r) => r.sku !== 'BTR-002'));
-  assert.deepEqual(core.detectReviewEdits(initial, removed).items, [{ review_id: rid('BTR-002'), change: 'REMOVED' }]);
-  assert.deepEqual(core.detectReviewEdits(removed, initial).items, [{ review_id: rid('BTR-002'), change: 'ADDED' }]);
+test('final Review check: unchanged decisions and notes pass, in any row order and with trailing cells omitted', () => {
+  assert.deepEqual(checkFinal(plannedReview), { items: 3 });
+  assert.deepEqual(checkFinal([plannedReview[0]].concat(plannedReview.slice(1).reverse())), { items: 3 });
+  // The Sheets API omits trailing empty cells; a short row is the same row.
+  const short = plannedReview.map((row) => { const copy = row.slice(); while (copy.length && copy[copy.length - 1] === '') copy.pop(); return copy; });
+  assert.deepEqual(checkFinal(short), { items: 3 });
+  // Blank rows are ignored, as in the step 6 read.
+  assert.deepEqual(checkFinal(plannedReview.concat([[], ['', '']])), { items: 3 });
+  // An empty Review tab stays empty.
+  assert.deepEqual(core.checkReviewUnchanged({ planned: reviewValues([]), finalRead: finalRead(reviewValues([])) }), { items: 0 });
+});
+
+// The planned read with one cell changed, as an operator would change it.
+const editCell = (id, column, value) => plannedReview.map((row) => {
+  if (row[0] !== id) return row;
+  const copy = row.slice();
+  copy[core.REVIEW_COLUMNS.indexOf(column)] = value;
+  return copy;
+});
+
+test('final Review check: a changed decision aborts with REVIEW_CHANGED naming the item and the field', () => {
+  assert.throws(() => checkFinal(editCell(rid('EGG-030'), 'decision', 'APPROVE')), changed(/RV\|EGG-030\|\S*: decision changed/));
+  // Clearing an approval is a change too: the plan may already apply it.
+  assert.throws(() => checkFinal(editCell(rid('TEA-001'), 'decision', '')), changed(/RV\|TEA-001\|\S*: decision changed/));
+});
+
+test('final Review check: a changed note aborts with REVIEW_CHANGED; values are compared exactly, type included', () => {
+  assert.throws(() => checkFinal(editCell(rid('BTR-002'), 'note', 'called the supplier')), changed(/RV\|BTR-002\|\S*: note changed/));
+  assert.throws(() => checkFinal(editCell(rid('BTR-002'), 'note', ' ')), changed(/note changed/), 'a space is a change');
+  const planned = editCell(rid('BTR-002'), 'note', 5);
+  const final = (value) => core.checkReviewUnchanged({ planned, finalRead: finalRead(editCell(rid('BTR-002'), 'note', value)) });
+  assert.deepEqual(final(5), { items: 3 });
+  assert.throws(() => final('5'), changed(/note changed/), 'the number 5 and the text "5" differ');
+});
+
+test('final Review check: an added, removed or duplicated item aborts with REVIEW_CHANGED', () => {
+  assert.throws(() => checkFinal(plannedReview.filter((row) => row[0] !== rid('BTR-002'))), changed(/RV\|BTR-002\|\S+ was removed/));
+  const extra = core.rowToValues(core.REVIEW_COLUMNS, Object.assign({}, w.expected.review[0], { review_id: 'RV|COF-100|drv-week2@2026-10-19T06:00:00.000Z', sku: 'COF-100' }));
+  assert.throws(() => checkFinal(plannedReview.concat([extra])), changed(/RV\|COF-100\|\S+ was added/));
+  assert.throws(() => checkFinal(plannedReview.concat([plannedReview[1]])), changed(/twice/));
+  assert.throws(() => checkFinal(plannedReview.concat([['', '', '', '', '', '', '', '', '', '', '', '', '', '', 'APPROVE']])), changed(/a row with no review_id was added/));
+  assert.throws(() => checkFinal([['review_id', 'sku']].concat(plannedReview.slice(1))), changed(/In the final Review read: Review header/));
+});
+
+test('final Review check: a failed or malformed final read aborts with REVIEW_READ_FAILED', () => {
+  const failed = (response) => assert.throws(() => core.checkReviewUnchanged({ planned: plannedReview, finalRead: response }),
+    (err) => err.code === 'REVIEW_READ_FAILED' && /Nothing was published/.test(err.detail));
+  // n8n's error item after three tries (continueOnFail), no response, and a malformed body.
+  failed({ error: { message: 'The service is currently unavailable', httpCode: '503' } });
+  failed(undefined);
+  failed({ values: 'not rows' });
 });

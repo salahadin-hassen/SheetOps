@@ -6,7 +6,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  core, week2, week2Input, sheetState, makeBatch, stripMessages, tableValues, WEEK2_BATCH_ID,
+  core, week2, week2Input, sheetState, afterWeek2State, makeBatch, stripMessages, tableValues, WEEK2_BATCH_ID,
 } = require('./support/helpers.js');
 
 const w = week2();
@@ -113,7 +113,8 @@ test('invalid sheet state is refused before anything is planned', () => {
   const dup = w.catalogBefore.concat([w.catalogBefore[0]]);
   expectCode('CATALOG_INVALID', sheetState({ catalog: dup }));
   expectCode('CATALOG_INVALID', sheetState({ catalog: [Object.assign({}, w.catalogBefore[0], { unit_price: '12,5' })] }));
-  expectCode('CATALOG_INVALID', sheetState({ catalog: [Object.assign({}, w.catalogBefore[0], { first_seen: 45000 })] }));
+  expectCode('CATALOG_INVALID', sheetState({ catalog: [Object.assign({}, w.catalogBefore[0], { first_seen: 'next week' })] }));
+  expectCode('CATALOG_INVALID', sheetState({ catalog: [Object.assign({}, w.catalogBefore[0], { first_seen: 46300.5 })] }));
   expectCode('REVIEW_INVALID', sheetState({ catalog: w.catalogBefore, review: [Object.assign({}, w.expected.review[0], { review_id: 'RV|XYZ|nope' })] }));
 
   const extraColumn = sheetState({ catalog: w.catalogBefore });
@@ -140,6 +141,57 @@ test('short rows from the Sheets API (trailing empty cells omitted) read the sam
   });
   short.sheet.catalog.splice(3, 0, []);
   assert.deepEqual(core.processBatch(short).writes, core.processBatch(full).writes);
+});
+
+test('dates that Google Sheets converted to serial day numbers read the same as text dates', () => {
+  // Hand-calculated: 36526 is 2000-01-01; +9497 days to 2026-01-01; +277 days to 2026-10-05.
+  const serial = { '2026-10-05': 46300, '2026-10-12': 46307 };
+  const pasted = week2Input();
+  pasted.sheet = sheetState({
+    catalog: w.catalogBefore.map((row) => Object.assign({}, row, {
+      first_seen: serial[row.first_seen], last_seen: serial[row.last_seen], last_changed: serial[row.last_changed],
+    })),
+  });
+  assert.deepEqual(core.processBatch(pasted).writes, core.processBatch(week2Input()).writes);
+});
+
+test('the date convention: whole serials 1–2958465 count days from 1899-12-30; text must be YYYY-MM-DD', () => {
+  // Hand-calculated from Google Sheets' epoch, 1899-12-30, which has no
+  // 1900-02-29: serial 1 is the next day; 32 is 1900-01-31, so 60 is
+  // 1900-02-28 and 61 is 1900-03-01. 46300 is 2026-10-05 (see the test
+  // above), and 46314 = 46300 + 14 is 2026-10-19. 2958465 is 9999-12-31.
+  const dates = [[1, '1899-12-31'], [60, '1900-02-28'], [61, '1900-03-01'], [46300, '2026-10-05'],
+    [46314, '2026-10-19'], [2958465, '9999-12-31'], ['2026-10-05', '2026-10-05'], [' 2026-10-05 ', '2026-10-05']];
+  for (const [value, date] of dates) assert.equal(core.sheetDate(value), date, JSON.stringify(value));
+
+  // Everything else is refused by the tab reader, never guessed.
+  const tea = w.catalogBefore.find((row) => row.sku === 'TEA-001');
+  for (const value of [0, -1, 46300.5, 2958466, '46300', '2026-02-30', '05/10/2026', true]) {
+    assert.throws(
+      () => core.processBatch(Object.assign(week2Input(), { sheet: sheetState({ catalog: [Object.assign({}, tea, { last_seen: value })] }) })),
+      (err) => err instanceof core.SheetOpsError && err.code === 'CATALOG_INVALID' && /last_seen/.test(err.detail),
+      JSON.stringify(value),
+    );
+  }
+});
+
+test('Review dates stored as serials read the same as text dates; bad ones are REVIEW_INVALID', () => {
+  // 2026-10-19 is serial 46314 (previous test).
+  const serials = afterWeek2State();
+  const text = afterWeek2State();
+  const first = core.REVIEW_COLUMNS.indexOf('first_seen');
+  const last = core.REVIEW_COLUMNS.indexOf('last_seen');
+  for (const row of serials.review.slice(1)) {
+    assert.deepEqual([row[first], row[last]], ['2026-10-19', '2026-10-19']);
+    row[first] = 46314;
+    row[last] = 46314;
+  }
+  assert.deepEqual(core.processBatch(Object.assign(week2Input(), { sheet: serials })).writes,
+    core.processBatch(Object.assign(week2Input(), { sheet: text })).writes);
+
+  const fractional = afterWeek2State();
+  fractional.review[1][last] = 46314.25;
+  assert.throws(() => core.processBatch(Object.assign(week2Input(), { sheet: fractional })), (err) => err.code === 'REVIEW_INVALID');
 });
 
 test('the Review tab header must match exactly', () => {

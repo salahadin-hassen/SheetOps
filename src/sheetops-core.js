@@ -6,8 +6,9 @@
  * Pure functions only: no clock reads, no randomness, no network, no require().
  * Times, Drive metadata and sheet contents all arrive as inputs, so the same
  * inputs always produce the same plan. The file runs unchanged under
- * `node --test` and inside an n8n Code node; the export block at the bottom is
- * skipped where `module` does not exist.
+ * `node --test` and inside an n8n Code node. n8n's Code node also defines
+ * `module`, so the export block at the bottom runs there too; that is harmless
+ * because n8n uses the code's return value.
  *
  * Specification: docs/data-contract.md. "§n" comments point to its sections.
  */
@@ -27,6 +28,13 @@ const DEFAULT_CONFIG = Object.freeze({
   max_listed_files: 50,
   max_attempts: 3,
   stale_started_minutes: 15,
+  // Off (the default): an unresolved publication, a STARTED row whose publish
+  // outcome nobody established, blocks scheduled runs until a person
+  // reconciles it (§2). Its age only shows that no run is still active; it
+  // never shows what happened to the publish. On: scheduled runs reprocess it
+  // themselves, relying on the version check (§12), which the live tests
+  // T-VERSION-1 and T-VERSION-2 must confirm first.
+  auto_recover_uncertain: false,
   max_request_bytes: 2000000,
   max_price_cents: 1000000000,
   max_name_length: 200,
@@ -95,6 +103,14 @@ const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.
 const BATCH_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 const COMMITTED_STATUSES = Object.freeze(['SUCCESS', 'SUCCESS_WITH_EXCEPTIONS']);
+
+// The publication version (§12): a hidden tab whose sheet ID is the version.
+// Every publish deletes the tab with the ID it planned from and adds it back
+// with a higher ID, so a publish planned from an older version is rejected.
+const VERSION_TAB = '_sheetops_version';
+const VERSION_BASE = 1000000000;
+const VERSION_MAX = 2147483646;
+const VERSION_EPOCH = Date.UTC(2026, 0, 1);
 const RUN_STATUSES = Object.freeze([
   'STARTED', 'SUCCESS', 'SUCCESS_WITH_EXCEPTIONS', 'REJECTED_FILE', 'HALTED_REVIEW',
   'FAILED', 'INTERRUPTED', 'BLOCKED',
@@ -183,6 +199,16 @@ function isRealDate(year, month, day) {
   const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   return day <= days[month - 1];
+}
+
+// A date pasted into Google Sheets is usually converted to a date value, which
+// the API returns as a serial day number (day 0 = 1899-12-30). Converting it
+// back is exact, so date columns accept it.
+function sheetDate(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0 && value < 2958466) {
+    return new Date(Date.UTC(1899, 11, 30) + value * 86400000).toISOString().slice(0, 10);
+  }
+  return cellString(value).trim();
 }
 
 function isDateString(value) {
@@ -533,7 +559,7 @@ function readCatalog(values, cfg) {
     }
     const dates = {};
     for (const column of ['first_seen', 'last_seen', 'last_changed']) {
-      dates[column] = cellString(row[column]).trim();
+      dates[column] = sheetDate(row[column]);
       if (!isDateString(dates[column])) fail(`${column} "${dates[column]}" is not YYYY-MM-DD`);
     }
     bySku.set(sku, {
@@ -563,8 +589,8 @@ function readReview(values, cfg) {
     if (!UNITS.includes(unit)) fail(`unknown proposed_unit "${unit}"`);
     const cents = readSheetPrice(row.proposed_price, cfg.max_price_cents);
     if (cents === null) fail(`unreadable proposed_price "${cellString(row.proposed_price)}"`);
-    const firstSeen = cellString(row.first_seen).trim();
-    const lastSeen = cellString(row.last_seen).trim();
+    const firstSeen = sheetDate(row.first_seen);
+    const lastSeen = sheetDate(row.last_seen);
     if (!isDateString(firstSeen) || !isDateString(lastSeen)) fail('first_seen and last_seen must be YYYY-MM-DD');
     const sourceRow = Number(cellString(row.source_row).trim());
     if (!Number.isInteger(sourceRow) || sourceRow < 2) fail(`invalid source_row "${cellString(row.source_row)}"`);
@@ -598,6 +624,17 @@ function readIdColumn(tab, columns, tabName) {
   return ids;
 }
 
+// The first free row (1-based) of Changes and Exceptions: just below the last
+// row the ID-column read returned. New history rows are written there, at a
+// fixed range, so replaying the same publish rewrites the same cells (§12).
+function nextRows(sheet) {
+  const next = (tab) => {
+    const rows = tab && Number.isInteger(tab.rows) ? tab.rows : ((tab && tab.ids) || []).length;
+    return 2 + rows;
+  };
+  return { changes: next(sheet.changes), exceptions: next(sheet.exceptions) };
+}
+
 function readRunLog(values) {
   const rows = readTable(values, RUNLOG_COLUMNS, TABS.runLog);
   return rows.map((row) => {
@@ -627,6 +664,7 @@ function readRunLog(values) {
 // Source versions and queue selection (§2)
 // ---------------------------------------------------------------------------
 
+// Describes one Drive listing entry and applies the pre-download checks (§2).
 function describeSourceFile(file, config) {
   const cfg = withDefaults(config);
   const source = file || {};
@@ -637,6 +675,12 @@ function describeSourceFile(file, config) {
   if (!FILE_ID_PATTERN.test(id) || modified === null || created === null) {
     throw new SheetOpsError('INVALID_LISTING', `Drive entry "${name}" lacks a valid id, modifiedTime or createdTime`);
   }
+  // Drive reports size as a string; Google-native files have no size.
+  let size = null;
+  if (source.size !== undefined && source.size !== null && source.size !== '') {
+    size = Number(source.size);
+    if (!Number.isInteger(size) || size < 0) throw new SheetOpsError('INVALID_LISTING', `Drive entry "${name}" has an invalid size`);
+  }
   const version = {
     batch_id: `${id}@${modified}`,
     file_id: id,
@@ -644,12 +688,25 @@ function describeSourceFile(file, config) {
     effective_date: '',
     modified_at: modified,
     created_at: created,
-    name_error: '',
+    size,
+    reject_code: '',
+    reject_message: '',
+  };
+  const reject = (code, message) => {
+    version.reject_code = code;
+    version.reject_message = message;
   };
   const match = FILE_NAME_PATTERN.exec(name);
-  if (!match || !isRealDate(Number(match[2]), Number(match[3]), Number(match[4]))) version.name_error = 'BAD_FILENAME';
-  else if (match[1] !== cfg.supplier) version.name_error = 'WRONG_SUPPLIER';
-  else version.effective_date = `${match[2]}-${match[3]}-${match[4]}`;
+  if (cellString(source.mimeType).startsWith('application/vnd.google-apps.')) {
+    reject('NOT_A_CSV_FILE', `"${name}" is a Google Docs, Sheets or other native file, not an uploaded CSV`);
+  } else if (!match || !isRealDate(Number(match[2]), Number(match[3]), Number(match[4]))) {
+    reject('BAD_FILENAME', `"${name}" does not match ${cfg.supplier}_YYYY-MM-DD.csv`);
+  } else if (match[1] !== cfg.supplier) {
+    reject('WRONG_SUPPLIER', `Supplier part of "${name}" is not ${cfg.supplier}`);
+  } else {
+    version.effective_date = `${match[2]}-${match[3]}-${match[4]}`;
+    if (size !== null && size > cfg.max_file_bytes) reject('FILE_TOO_LARGE', `"${name}" is ${size} bytes; the limit is ${cfg.max_file_bytes}`);
+  }
   return version;
 }
 
@@ -674,10 +731,20 @@ function selectNextBatch(input) {
     confirm_mass_discontinue: false, reprocess: false,
   }, extra);
 
+  // A partial listing could hide an older file and break the processing order,
+  // so SheetOps never works from one (§2).
   if (files.length > cfg.max_listed_files) {
     return result('BLOCKED', {
-      code: 'INBOX_TOO_LARGE',
-      message: `${files.length} files listed; the limit is ${cfg.max_listed_files}`,
+      code: 'QUEUE_TOO_LARGE',
+      message: `More than ${cfg.max_listed_files} files are in the inbox (${files.length} listed). `
+        + `Move processed files to another folder until at most ${cfg.max_listed_files} remain, then run again`,
+    });
+  }
+  if (input.listing_complete === false) {
+    return result('BLOCKED', {
+      code: 'QUEUE_TOO_LARGE',
+      message: `Drive returned the inbox listing in more than one page (${files.length} file${files.length === 1 ? '' : 's'} on the first page). `
+        + `Run again; if this repeats, move processed files to another folder`,
     });
   }
   const versions = files.map((file) => describeSourceFile(file, cfg));
@@ -709,19 +776,32 @@ function selectNextBatch(input) {
   const stateOf = (version) => states.get(version.batch_id) || { committed: false, rejected: false, halted: false, attempts: 0 };
   const open = (version) => !stateOf(version).committed && !stateOf(version).rejected;
 
-  const malformed = versions.filter((v) => v.name_error !== '' && open(v)).sort((a, b) => compareKeys(
+  const prechecked = versions.filter((v) => v.reject_code !== '' && open(v)).sort((a, b) => compareKeys(
     [a.modified_at, a.created_at, a.file_id], [b.modified_at, b.created_at, b.file_id]));
-  const valid = versions.filter((v) => v.name_error === '' && open(v)).sort((a, b) => compareKeys(orderKey(a), orderKey(b)));
-  const queued = malformed.length + valid.length;
+  const valid = versions.filter((v) => v.reject_code === '' && open(v)).sort((a, b) => compareKeys(orderKey(a), orderKey(b)));
+  const queued = prechecked.length + valid.length;
   const base = { stale_runs: staleRuns };
+
+  // A stale STARTED row is a publication whose outcome nobody knows: it may
+  // still land. Until a publish moves the version past it, only its own batch
+  // may be published, so a newer batch can never overtake it (§2, §12).
+  const unresolved = Array.from(new Set(staleRuns.map((run) => run.batch_id)));
+  const pending = unresolved.length === 1 ? versions.find((v) => v.batch_id === unresolved[0]) : null;
+  const unresolvedMessage = () => {
+    const rows = staleRuns.map((run) => `row ${run.row_number} (run ${run.run_id}, ${run.batch_id})`).join('; ');
+    return `Publication outcome unknown for ${rows}`;
+  };
 
   if (params.target_batch_id || params.reprocess_latest) {
     const refuse = (code, message) => result('REFUSED', Object.assign({}, base, { code, message, queue_remaining: queued }));
     const targetId = params.reprocess_latest ? (committed ? committed.batch_id : '') : cellString(params.target_batch_id);
+    if (unresolved.length > 0 && !(unresolved.length === 1 && targetId === unresolved[0])) {
+      return refuse('PUBLICATION_UNRESOLVED', `${unresolvedMessage()}; only target_batch_id ${unresolved.join(', ')} can run`);
+    }
     if (targetId === '') return refuse('NOTHING_COMMITTED', 'No batch has been committed yet');
     const version = versions.find((v) => v.batch_id === targetId);
     if (!version) return refuse('TARGET_NOT_IN_INBOX', `${targetId} is not in the inbox`);
-    if (version.name_error !== '') return refuse('TARGET_BAD_FILENAME', `${version.name} has a malformed name`);
+    if (version.reject_code !== '') return refuse('TARGET_PRECHECK_FAILED', `${version.reject_code}: ${version.reject_message}`);
     if (stateOf(version).rejected) return refuse('TARGET_REJECTED', `${targetId} was rejected`);
     if (committed && compareKeys(orderKey(version), committed.key) < 0) {
       return refuse('TARGET_OUT_OF_ORDER', `${targetId} is older than the committed batch ${committed.batch_id}`);
@@ -734,12 +814,47 @@ function selectNextBatch(input) {
     }));
   }
 
-  if (malformed.length > 0) {
-    const version = malformed[0];
-    const message = version.name_error === 'WRONG_SUPPLIER'
-      ? `Supplier part of "${version.name}" is not ${cfg.supplier}`
-      : `"${version.name}" does not match ${cfg.supplier}_YYYY-MM-DD.csv`;
-    return result('REJECT_FILE', Object.assign({}, base, { code: version.name_error, message, batch: version, queue_remaining: queued - 1 }));
+  if (unresolved.length > 0) {
+    if (cfg.auto_recover_uncertain !== true) {
+      return result('BLOCKED', Object.assign({}, base, {
+        code: 'PUBLICATION_UNRESOLVED',
+        message: `${unresolvedMessage()}. Its publish outcome is not established and automatic recovery is off. Inspect the evidence listed in docs/setup.md ("An unresolved publication"), then reprocess it explicitly with a manual run, target_batch_id ${unresolved.join(', ')}`,
+        batch: pending, queue_remaining: queued,
+      }));
+    }
+    if (!pending) {
+      return result('BLOCKED', Object.assign({}, base, {
+        code: 'PUBLICATION_UNRESOLVED',
+        message: unresolved.length > 1
+          ? `${unresolvedMessage()}. More than one batch is unresolved; see the recovery steps in docs/setup.md`
+          : `${unresolvedMessage()}, and that file version is no longer in the inbox. Put it back, or see the recovery steps in docs/setup.md`,
+        queue_remaining: queued,
+      }));
+    }
+    const state = stateOf(pending);
+    const recover = (extra) => result('PROCESS', Object.assign({}, base, { batch: pending, reprocess: state.committed, queue_remaining: queued - (open(pending) ? 1 : 0) }, extra));
+    if (pending.reject_code !== '') {
+      return result('REJECT_FILE', Object.assign({}, base, { code: pending.reject_code, message: pending.reject_message, batch: pending, queue_remaining: queued - (open(pending) ? 1 : 0) }));
+    }
+    if (state.halted) {
+      return result('BLOCKED', Object.assign({}, base, { code: 'BATCH_HALTED', message: `${pending.batch_id} is waiting for a review decision`, batch: pending, queue_remaining: queued }));
+    }
+    if (state.attempts >= cfg.max_attempts) {
+      return result('BLOCKED', Object.assign({}, base, { code: 'RETRY_LIMIT', message: `${pending.batch_id} failed ${state.attempts} times`, batch: pending, queue_remaining: queued }));
+    }
+    if (committed && !state.committed && compareKeys(orderKey(pending), committed.key) < 0) {
+      return result('REJECT_FILE', Object.assign({}, base, {
+        code: 'OUT_OF_ORDER_FILE', message: `${pending.name} (${pending.batch_id}) is older than the committed batch ${committed.batch_id}`, batch: pending, queue_remaining: queued - 1,
+      }));
+    }
+    return recover({});
+  }
+
+  if (prechecked.length > 0) {
+    const version = prechecked[0];
+    return result('REJECT_FILE', Object.assign({}, base, {
+      code: version.reject_code, message: version.reject_message, batch: version, queue_remaining: queued - 1,
+    }));
   }
   for (const version of valid) {
     const state = stateOf(version);
@@ -898,6 +1013,7 @@ function fileRejectionPlan(ctx, problems, rowsRead) {
       error_message: problems.map((p) => p.message).join('; '),
     }, ctx.cfg),
     stale_runs: ctx.staleRuns,
+    next_rows: ctx.nextRows,
     summary: { rows_read: rowsRead, exceptions: exceptions.length, exceptions_new: fresh.length, warnings: [] },
   };
 }
@@ -922,6 +1038,7 @@ function haltPlan(ctx, missing, activeCount, rowsRead) {
       error_message: message,
     }, ctx.cfg),
     stale_runs: ctx.staleRuns,
+    next_rows: ctx.nextRows,
     summary: { rows_read: rowsRead, missing, active: activeCount, exceptions: 1, exceptions_new: fresh.length, warnings: [] },
   };
 }
@@ -938,6 +1055,7 @@ function planFileRejection(input) {
     run: input.run || {},
     staleRuns: input.stale_runs || [],
     existingExceptionIds: readIdColumn(sheet.exceptions, EXCEPTIONS_COLUMNS, TABS.exceptions),
+    nextRows: nextRows(sheet),
   };
   return fileRejectionPlan(ctx, [fileProblem(input.code, '', batch.name, cellString(input.message))], '');
 }
@@ -951,7 +1069,7 @@ function processBatch(input) {
   const reviews = readReview(sheet.review, cfg);
   const existingChangeIds = readIdColumn(sheet.changes, CHANGES_COLUMNS, TABS.changes);
   const existingExceptionIds = readIdColumn(sheet.exceptions, EXCEPTIONS_COLUMNS, TABS.exceptions);
-  const ctx = { cfg, batch, run: input.run || {}, staleRuns: input.stale_runs || [], existingExceptionIds };
+  const ctx = { cfg, batch, run: input.run || {}, staleRuns: input.stale_runs || [], existingExceptionIds, nextRows: nextRows(sheet) };
   const eff = batch.effective_date;
 
   // File-level checks (§1, §3, §4). Each rejects the whole file.
@@ -1290,6 +1408,7 @@ function processBatch(input) {
     },
     run_row: makeRunRow(ctx.run, batch, status, summary, cfg),
     stale_runs: ctx.staleRuns,
+    next_rows: ctx.nextRows,
     summary: Object.assign({}, summary, {
       changes_detected: changes.length,
       changes_new: newChanges.length,
@@ -1356,8 +1475,32 @@ function checkRunRowNumber(runRowNumber, meta) {
   }
 }
 
-// Builds the single spreadsheets.batchUpdate body. The final request rewrites
-// this run's STARTED row: the commit marker.
+// The version this publish moves from and to (§12). `from` is the ID of the
+// version tab as read in step 5 (null before the first publish); `to` is
+// higher than every ID used before, also after the tab is deleted by hand,
+// because it is at least the seconds since 2026-01-01 above VERSION_BASE.
+function publicationVersion(sheetMeta, startedAt) {
+  const tab = sheetMeta && sheetMeta[VERSION_TAB];
+  let from = null;
+  if (tab) {
+    if (!Number.isInteger(tab.sheetId) || tab.sheetId <= VERSION_BASE || tab.sheetId >= VERSION_MAX) {
+      throw new SheetOpsError('OUTPUT_SCHEMA_MISMATCH', `The ${VERSION_TAB} tab has sheet ID ${tab.sheetId}, which SheetOps did not create`);
+    }
+    from = tab.sheetId;
+  }
+  const started = normalizeTimestamp(startedAt);
+  if (started === null) throw new SheetOpsError('PLAN_INVALID', 'The run row has no valid started_at');
+  const seconds = Math.floor((Date.parse(started) - VERSION_EPOCH) / 1000);
+  const to = Math.max((from === null ? VERSION_BASE : from) + 1, VERSION_BASE + seconds);
+  if (to > VERSION_MAX) throw new SheetOpsError('PLAN_INVALID', 'Publication version IDs are exhausted');
+  for (const [title, meta] of Object.entries(sheetMeta || {})) {
+    if (meta.sheetId === to) throw new SheetOpsError('PLAN_INVALID', `Version ID ${to} is already used by the "${title}" tab`);
+  }
+  return { from, to };
+}
+
+// Builds the single spreadsheets.batchUpdate body. It starts with the version
+// check and ends with the commit marker, the rewrite of this run's STARTED row.
 function buildPublishRequest(input) {
   const cfg = withDefaults(input.config);
   const plan = input.plan;
@@ -1382,16 +1525,32 @@ function buildPublishRequest(input) {
       },
     });
   };
-  const append = (tab, columns, rows) => {
+  const writeAt = (tab, columns, rows, firstRow) => {
     if (rows.length === 0) return;
     const meta = requireTabMeta(sheetMeta, tab, columns);
-    requests.push({ appendCells: { sheetId: meta.sheetId, rows: rows.map((row) => toRowData(columns, row)), fields: 'userEnteredValue' } });
+    if (!Number.isInteger(firstRow) || firstRow < 2) throw new SheetOpsError('PLAN_INVALID', `${tab} start row ${firstRow} is not a data row`);
+    const end = firstRow - 1 + rows.length;
+    if (end > meta.rowCount) requests.push({ appendDimension: { sheetId: meta.sheetId, dimension: 'ROWS', length: end - meta.rowCount } });
+    requests.push({
+      updateCells: {
+        range: { sheetId: meta.sheetId, startRowIndex: firstRow - 1, endRowIndex: end, startColumnIndex: 0, endColumnIndex: columns.length },
+        rows: rows.map((row) => toRowData(columns, row)),
+        fields: 'userEnteredValue',
+      },
+    });
   };
+
+  const version = publicationVersion(sheetMeta, plan.run_row.started_at);
+  if (version.from !== null) requests.push({ deleteSheet: { sheetId: version.from } });
+  requests.push({
+    addSheet: { properties: { sheetId: version.to, title: VERSION_TAB, hidden: true, gridProperties: { rowCount: 1, columnCount: 1 } } },
+  });
 
   if (plan.writes.catalog) replace(TABS.catalog, CATALOG_COLUMNS, plan.writes.catalog);
   if (plan.writes.review) replace(TABS.review, REVIEW_COLUMNS, plan.writes.review);
-  append(TABS.changes, CHANGES_COLUMNS, plan.writes.changes);
-  append(TABS.exceptions, EXCEPTIONS_COLUMNS, plan.writes.exceptions);
+  const next = plan.next_rows || {};
+  writeAt(TABS.changes, CHANGES_COLUMNS, plan.writes.changes, next.changes);
+  writeAt(TABS.exceptions, EXCEPTIONS_COLUMNS, plan.writes.exceptions, next.exceptions);
 
   const log = requireTabMeta(sheetMeta, TABS.runLog, RUNLOG_COLUMNS);
   checkRunRowNumber(runRowNumber, log);
@@ -1413,14 +1572,6 @@ function buildPublishRequest(input) {
   return finishBody(requests, cfg);
 }
 
-// A single run-row overwrite, used for FAILED after a definitive failure.
-function buildRunRowUpdateRequest(input) {
-  const cfg = withDefaults(input.config);
-  const log = requireTabMeta(input.sheetMeta, TABS.runLog, RUNLOG_COLUMNS);
-  checkRunRowNumber(input.runRowNumber, log);
-  return finishBody([runRowRequest(log, input.runRowNumber, input.row)], cfg);
-}
-
 // 4xx (except 408) means Google refused the request, so nothing was applied.
 function classifyPublishFailure(failure) {
   const status = failure && failure.httpStatus;
@@ -1428,68 +1579,337 @@ function classifyPublishFailure(failure) {
   return 'UNKNOWN';
 }
 
-function reconcileAfterUnknown(input) {
-  let runs;
-  try {
-    runs = readRunLog(input.runLog);
-  } catch (err) {
-    return { outcome: 'INCONCLUSIVE', reason: err.message };
-  }
-  const row = runs.find((run) => run.run_id === cellString(input.runId));
-  if (!row) return { outcome: 'INCONCLUSIVE', reason: 'run row not found' };
-  if (COMMITTED_STATUSES.includes(row.status) && row.batch_id === cellString(input.batchId)) {
-    return { outcome: 'CONFIRMED', status: row.status };
-  }
-  if (row.status === 'STARTED') return { outcome: 'NOT_APPLIED' };
-  return { outcome: 'INCONCLUSIVE', reason: `run row shows ${row.status}` };
-}
-
-// Decides what to write after a publish error (§12). `write` is the run row to
-// store, or null when nothing may be written.
-function resolvePublishFailure(input) {
-  const kind = classifyPublishFailure(input);
-  if (kind === 'REJECTED') {
-    return {
-      outcome: 'REJECTED',
-      write: buildFailedRunRow(input.run, input.batch, 'PUBLISH_REJECTED', `HTTP ${input.httpStatus}: ${cellString(input.errorMessage)}`),
-    };
-  }
-  if (!input.runLog) return { outcome: 'INCONCLUSIVE', write: null, reason: 'Run Log could not be read' };
-  const check = reconcileAfterUnknown({ runLog: input.runLog, runId: input.run && input.run.run_id, batchId: input.batch && input.batch.batch_id });
-  if (check.outcome === 'NOT_APPLIED') {
-    return {
-      outcome: 'NOT_APPLIED',
-      write: buildFailedRunRow(input.run, input.batch, 'PUBLISH_NOT_APPLIED', `Outcome unknown (${cellString(input.errorMessage)}); commit marker absent`),
-    };
-  }
-  return Object.assign({ write: null }, check);
-}
-
-// §8: compares the Review tab read at the start of a run with a second read
-// taken just before publishing.
-function detectReviewEdits(initialValues, latestValues) {
-  const index = (values) => {
-    const map = new Map();
-    for (const row of readTable(values, REVIEW_COLUMNS, TABS.review)) {
-      map.set(cellString(row.review_id).trim(), { decision: cellString(row.decision), note: cellString(row.note) });
-    }
-    return map;
+// A publish error as a failure (§12): definitive when Google refused the
+// request, unknown when it may have been applied.
+function publishFailure(result) {
+  const definitive = result.outcome === 'REJECTED';
+  const status = Number.isInteger(result.httpStatus) ? `HTTP ${result.httpStatus}: ` : '';
+  return {
+    kind: definitive ? 'DEFINITIVE' : 'UNKNOWN',
+    code: definitive ? 'PUBLISH_REJECTED' : 'PUBLISH_OUTCOME_UNKNOWN',
+    message: `${status}${cellString(result.message)}`,
   };
-  const before = index(initialValues);
-  const after = index(latestValues);
-  const items = [];
-  for (const [id, value] of before) {
-    const now = after.get(id);
-    if (!now) items.push({ review_id: id, change: 'REMOVED' });
-    else if (now.decision !== value.decision || now.note !== value.note) items.push({ review_id: id, change: 'EDITED' });
+}
+
+// One Run Log row read without its header, by column position.
+function runRowFacts(cells) {
+  const row = Array.isArray(cells) ? cells : [];
+  const at = (column) => cellString(row[RUNLOG_COLUMNS.indexOf(column)]).trim();
+  return { run_id: at('run_id'), status: at('status'), batch_id: at('batch_id') };
+}
+
+// Step 6 check (§12): every row the publish overwrites by position must still
+// hold what this run expects. This run's row must be its own STARTED row, or
+// nothing is published. A stale row that has moved is dropped from this
+// run's INTERRUPTED marks and left for a later run.
+function verifyRunLogRows(input) {
+  const byRow = new Map(readRunLog(input.runLog).map((run) => [run.row_number, run]));
+  const n = input.runRowNumber;
+  const own = byRow.get(n);
+  if (!own || own.run_id !== cellString(input.run && input.run.run_id)
+    || own.batch_id !== cellString(input.batch && input.batch.batch_id) || own.status !== 'STARTED') {
+    const shows = own ? `run ${own.run_id}, ${own.status}` : 'no row';
+    throw new SheetOpsError('RUN_ROW_UNVERIFIED', `Run Log row ${n} shows ${shows}, not this run's STARTED row; was the Run Log edited during the run?`);
   }
-  for (const id of after.keys()) if (!before.has(id)) items.push({ review_id: id, change: 'ADDED' });
-  items.sort((a, b) => compareStrings(a.review_id, b.review_id));
-  return { edited: items.length > 0, items };
+  return (input.staleRuns || []).filter((stale) => {
+    const current = byRow.get(stale.row_number);
+    return Boolean(current) && current.run_id === stale.run_id && current.status === 'STARTED';
+  });
+}
+
+// The final Review check (§8), just before the publish. `planned` is the
+// Review range of the step 6 read the plan was built from (rows of values,
+// header first); `finalRead` is the values.get response of the final read.
+// Every operator decision and note must be identical, type included, for the
+// same set of review IDs. Row order does not matter: items are matched by
+// review_id. Throws REVIEW_READ_FAILED or REVIEW_CHANGED; either way nothing
+// may be published. An edit saved after this read can still be lost (§8).
+function checkReviewUnchanged(input) {
+  let finalValues;
+  try {
+    finalValues = parseValueRange(input.finalRead, 'the Review tab for the final check');
+  } catch (err) {
+    if (!(err instanceof SheetOpsError)) throw err;
+    throw new SheetOpsError('REVIEW_READ_FAILED', `${err.detail}. Nothing was published`);
+  }
+  const decisions = (values) => {
+    const items = new Map();
+    for (const row of readTable(values, REVIEW_COLUMNS, TABS.review)) {
+      const id = cellString(row.review_id).trim();
+      if (items.has(id)) throw new SheetOpsError('REVIEW_CHANGED', `Review lists ${id} twice`);
+      items.set(id, { decision: row.decision, note: row.note });
+    }
+    return items;
+  };
+  const before = decisions(input.planned);
+  let after;
+  try {
+    after = decisions(finalValues);
+  } catch (err) {
+    if (!(err instanceof SheetOpsError)) throw err;
+    throw new SheetOpsError('REVIEW_CHANGED', `In the final Review read: ${err.detail}. Nothing was published`);
+  }
+  const changes = [];
+  for (const [id, item] of before) {
+    const now = after.get(id);
+    if (!now) changes.push(`${id} was removed`);
+    else for (const field of ['decision', 'note']) if (now[field] !== item[field]) changes.push(`${id}: ${field} changed`);
+  }
+  for (const id of after.keys()) if (!before.has(id)) changes.push(`${id || 'a row with no review_id'} was added`);
+  if (changes.length > 0) {
+    const listed = changes.slice(0, 5).join('; ') + (changes.length > 5 ? `; and ${changes.length - 5} more` : '');
+    throw new SheetOpsError('REVIEW_CHANGED', `Review changed after the plan was built (${listed}). Nothing was published; the batch must be processed again`);
+  }
+  return { items: before.size };
+}
+
+// Decides what this run may write after a failure (§12). `rowRead` is the
+// step 8 read of this run's row (a values.get response, or { error }).
+// `write` is the FAILED row to store, or null: nothing may be written.
+// After an unknown publish outcome it is always null.
+function resolveRunFailure(input) {
+  const failure = input.failure;
+  const n = input.runRowNumber;
+  let facts = null;
+  let shows;
+  try {
+    facts = runRowFacts(parseValueRange(input.rowRead, `Run Log row ${n}`)[0]);
+    shows = facts.run_id === '' ? 'is empty' : `shows run ${facts.run_id}, ${facts.status}`;
+  } catch (err) {
+    if (!(err instanceof SheetOpsError)) throw err;
+    shows = `could not be read (${err.detail})`;
+  }
+  const ours = facts !== null && facts.run_id === cellString(input.run && input.run.run_id)
+    && facts.batch_id === cellString(input.batch && input.batch.batch_id);
+  // Only this run could have finished its row, so unless the read shows it,
+  // the row still says STARTED.
+  const runStatus = ours ? facts.status : 'STARTED';
+
+  if (failure.kind === 'UNKNOWN') {
+    if (ours && facts.status === cellString(input.expectedStatus)) {
+      return {
+        outcome: 'CONFIRMED', write: null, run_status: facts.status, code: '',
+        message: `The publish response was lost (${failure.message}); row ${n} shows ${facts.status}, so Google applied it`,
+      };
+    }
+    return {
+      outcome: 'UNKNOWN', write: null, run_status: runStatus, code: 'PUBLISH_OUTCOME_UNKNOWN',
+      message: `${failure.message}; after the wait, row ${n} ${shows}. Nothing was written; the next run reconciles it once 15 minutes have passed`,
+    };
+  }
+  if (ours && facts.status === 'STARTED') {
+    return {
+      outcome: 'FAILED', write: buildFailedRunRow(input.run, input.batch, failure.code, failure.message),
+      run_status: 'FAILED', code: failure.code, message: failure.message,
+    };
+  }
+  return {
+    outcome: 'UNVERIFIED', write: null, run_status: runStatus, code: 'RUN_ROW_UNVERIFIED',
+    message: `${failure.code}: ${failure.message}. FAILED was not written because row ${n} ${shows}`,
+  };
 }
 
 // ---------------------------------------------------------------------------
-// Exports (skipped inside an n8n Code node)
+// Google API requests and responses (§12). n8n's credential adds the access
+// token; these functions only build URLs and bodies and check what comes back.
+// ---------------------------------------------------------------------------
+
+const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
+const DRIVE_API = 'https://www.googleapis.com/drive/v3/files';
+const DRIVE_ID_PATTERN = /^[A-Za-z0-9_-]{10,200}$/;
+
+function columnLetter(count) {
+  let letters = '';
+  let n = count;
+  while (n > 0) {
+    letters = String.fromCharCode(65 + ((n - 1) % 26)) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters;
+}
+
+function a1(tab, cells) {
+  return `'${tab.replace(/'/g, "''")}'!${cells}`;
+}
+
+function queryString(params) {
+  return Object.keys(params).map((key) => `${key}=${encodeURIComponent(params[key])}`).join('&');
+}
+
+function checkSettings(settings) {
+  const s = settings || {};
+  const fail = (why) => { throw new SheetOpsError('SETTINGS_INVALID', why); };
+  const ids = {};
+  for (const name of ['spreadsheet_id', 'inbox_folder_id']) {
+    const value = cellString(s[name]).trim();
+    if (value.startsWith('PASTE_')) fail(`${name} still holds its placeholder; paste the real ID into the Settings node`);
+    if (!DRIVE_ID_PATTERN.test(value)) fail(`${name} "${value}" is not a Google ID`);
+    ids[name] = value;
+  }
+  const supplier = cellString(s.supplier).trim();
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(supplier)) fail(`supplier "${supplier}" must use lowercase letters, digits and hyphens`);
+  const currency = cellString(s.currency).trim();
+  if (!/^[A-Z]{3}$/.test(currency)) fail(`currency "${currency}" must be a three-letter code`);
+  return { spreadsheet_id: ids.spreadsheet_id, inbox_folder_id: ids.inbox_folder_id, supplier, currency };
+}
+
+// Every read returns cells as stored: text as strings, numbers as numbers and
+// date cells as serial day numbers, which sheetDate() reads (§10).
+const READ_OPTIONS = queryString({ valueRenderOption: 'UNFORMATTED_VALUE', dateTimeRenderOption: 'SERIAL_NUMBER', majorDimension: 'ROWS' });
+
+function buildGoogleRequests(settings) {
+  const s = checkSettings(settings);
+  const cfg = withDefaults({ supplier: s.supplier, currency: s.currency });
+  const sheet = `${SHEETS_API}/${s.spreadsheet_id}`;
+  const values = READ_OPTIONS;
+  const working = [
+    [TABS.catalog, `A1:${columnLetter(CATALOG_COLUMNS.length)}`],
+    [TABS.review, `A1:${columnLetter(REVIEW_COLUMNS.length)}`],
+    [TABS.changes, `A1:${columnLetter(CHANGES_COLUMNS.length)}1`],
+    [TABS.changes, 'A2:A'],
+    [TABS.exceptions, `A1:${columnLetter(EXCEPTIONS_COLUMNS.length)}1`],
+    [TABS.exceptions, 'A2:A'],
+    // Read again just before planning, to check the rows the publish overwrites (§12).
+    [TABS.runLog, `A1:${columnLetter(RUNLOG_COLUMNS.length)}`],
+  ];
+  return {
+    list_inbox: `${DRIVE_API}?${queryString({
+      q: `'${s.inbox_folder_id}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`,
+      fields: 'nextPageToken,files(id,name,mimeType,size,modifiedTime,createdTime)',
+      pageSize: String(cfg.max_listed_files + 1),
+      supportsAllDrives: 'true',
+      includeItemsFromAllDrives: 'true',
+    })}`,
+    read_run_log: `${sheet}/values/${encodeURIComponent(a1(TABS.runLog, `A1:${columnLetter(RUNLOG_COLUMNS.length)}`))}?${values}`,
+    append_run_row: `${sheet}/values/${encodeURIComponent(a1(TABS.runLog, 'A1'))}:append?${queryString({ valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS' })}`,
+    sheet_meta: `${sheet}?${queryString({ fields: 'sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))' })}`,
+    read_working_tabs: `${sheet}/values:batchGet?${working.map(([tab, cells]) => `ranges=${encodeURIComponent(a1(tab, cells))}`).join('&')}&${values}`,
+    // The final Review check, just before the publish (§8): the same range as step 6.
+    read_review: `${sheet}/values/${encodeURIComponent(a1(TABS.review, working[1][1]))}?${values}`,
+    batch_update: `${sheet}:batchUpdate`,
+  };
+}
+
+function googleDownloadUrl(fileId) {
+  if (!FILE_ID_PATTERN.test(cellString(fileId))) throw new SheetOpsError('PLAN_INVALID', `Invalid Drive file id "${cellString(fileId)}"`);
+  return `${DRIVE_API}/${fileId}?${queryString({ alt: 'media', supportsAllDrives: 'true' })}`;
+}
+
+// This run's own Run Log row, 'Run Log'!A<n>:Z<n> (§12): the read that checks
+// it and the values.update that writes FAILED. Both need only the tab name and
+// row number, so they work even when reading the spreadsheet metadata failed.
+function buildRunRowRequests(input) {
+  const s = checkSettings(input.settings);
+  const n = input.runRowNumber;
+  if (!Number.isInteger(n) || n < 2) throw new SheetOpsError('PLAN_INVALID', `Run row number ${n} is not a data row`);
+  const range = a1(TABS.runLog, `A${n}:${columnLetter(RUNLOG_COLUMNS.length)}${n}`);
+  const url = `${SHEETS_API}/${s.spreadsheet_id}/values/${encodeURIComponent(range)}`;
+  return {
+    number: n,
+    range,
+    read_url: `${url}?${READ_OPTIONS}`,
+    update_url: `${url}?${queryString({ valueInputOption: 'RAW' })}`,
+  };
+}
+
+function buildRunRowUpdateRequest(input) {
+  const target = buildRunRowRequests(input);
+  return {
+    method: 'PUT',
+    url: target.update_url,
+    body: { range: target.range, majorDimension: 'ROWS', values: [rowToValues(RUNLOG_COLUMNS, input.row)] },
+  };
+}
+
+function errorText(error) {
+  if (error === undefined || error === null) return 'no response';
+  if (typeof error === 'string') return truncate(error, 300);
+  if (typeof error.message === 'string' && error.message !== '') return truncate(error.message, 300);
+  if (typeof error.code === 'string') return error.code;
+  return truncate(JSON.stringify(error), 300);
+}
+
+// HTTP nodes that may fail use "continue on fail": a failed call arrives as
+// { error }. This turns that into a run-level failure with a readable message.
+function requireRead(json, code, what) {
+  if (!json || typeof json !== 'object' || Array.isArray(json)) throw new SheetOpsError(code, `${what}: no response`);
+  if (json.error !== undefined) throw new SheetOpsError(code, `${what} failed: ${errorText(json.error)}`);
+  return json;
+}
+
+function parseDriveListing(response) {
+  const body = requireRead(response, 'INVALID_LISTING', 'Listing the inbox');
+  if (!Array.isArray(body.files)) throw new SheetOpsError('INVALID_LISTING', 'Drive listing has no files array');
+  return { files: body.files, complete: !body.nextPageToken };
+}
+
+function parseValueRange(response, what) {
+  const body = requireRead(response, 'READ_FAILED', `Reading ${what}`);
+  if (body.values === undefined) return [];
+  if (!Array.isArray(body.values) || body.values.some((row) => !Array.isArray(row))) {
+    throw new SheetOpsError('READ_FAILED', `${what} values are malformed`);
+  }
+  return body.values;
+}
+
+function parseWorkingTabs(response) {
+  const body = requireRead(response, 'READ_FAILED', 'Reading the Catalog, Review, Changes, Exceptions and Run Log tabs');
+  if (!Array.isArray(body.valueRanges) || body.valueRanges.length !== 7) {
+    throw new SheetOpsError('READ_FAILED', 'The tab read did not return the seven requested ranges');
+  }
+  const v = body.valueRanges.map((range, i) => parseValueRange(range, `range ${i + 1}`));
+  return {
+    catalog: v[0],
+    review: v[1],
+    changes: { header: v[2][0] || [], ids: v[3].map((row) => row[0]), rows: v[3].length },
+    exceptions: { header: v[4][0] || [], ids: v[5].map((row) => row[0]), rows: v[5].length },
+    runLog: v[6],
+  };
+}
+
+function parseSheetMeta(response) {
+  const body = requireRead(response, 'READ_FAILED', 'Reading spreadsheet metadata');
+  if (!Array.isArray(body.sheets)) throw new SheetOpsError('READ_FAILED', 'Spreadsheet metadata has no sheets array');
+  const meta = {};
+  for (const sheet of body.sheets) {
+    const p = sheet && sheet.properties;
+    if (!p || typeof p.title !== 'string') continue;
+    const grid = p.gridProperties || {};
+    // JSON responses may omit a sheetId of 0.
+    meta[p.title] = { sheetId: p.sheetId === undefined ? 0 : p.sheetId, rowCount: grid.rowCount, columnCount: grid.columnCount };
+  }
+  for (const tab of Object.values(TABS)) {
+    if (!meta[tab]) throw new SheetOpsError('OUTPUT_SCHEMA_MISMATCH', `The spreadsheet has no "${tab}" tab`);
+  }
+  return meta;
+}
+
+function parseAppendedRowNumber(response) {
+  const body = requireRead(response, 'RUNLOG_INVALID', 'Appending the Run Log row');
+  const range = cellString(body.updates && body.updates.updatedRange);
+  const match = /!A(\d+):[A-Z]+(\d+)$/.exec(range);
+  if (!match || match[1] !== match[2] || Number(match[1]) < 2) {
+    throw new SheetOpsError('RUNLOG_INVALID', `Unexpected appended range "${range}"`);
+  }
+  return Number(match[1]);
+}
+
+// Reads the publish node's output ("full response" + "never error"): an HTTP
+// status means Google answered; no status means the call failed in transit.
+function interpretPublishResponse(json) {
+  const item = json || {};
+  if (Number.isInteger(item.statusCode)) {
+    const status = item.statusCode;
+    if (status >= 200 && status < 300) return { outcome: 'APPLIED', httpStatus: status, message: '' };
+    const body = item.body;
+    const detail = body && typeof body === 'object' && body.error ? body.error : (typeof body === 'string' && body !== '' ? body : item.statusMessage);
+    return { outcome: classifyPublishFailure({ httpStatus: status }), httpStatus: status, message: errorText(detail) };
+  }
+  return { outcome: 'UNKNOWN', httpStatus: undefined, message: errorText(item.error) };
+}
+
+// ---------------------------------------------------------------------------
+// Exports (for Node; harmless inside an n8n Code node)
 // ---------------------------------------------------------------------------
 
 const SheetOps = {
@@ -1515,12 +1935,29 @@ const SheetOps = {
   buildFailedRunRow,
   rowToValues,
   buildPublishRequest,
+  publicationVersion,
+  VERSION_TAB,
+  VERSION_BASE,
+  VERSION_MAX,
+  buildRunRowRequests,
   buildRunRowUpdateRequest,
   classifyPublishFailure,
-  reconcileAfterUnknown,
-  resolvePublishFailure,
-  detectReviewEdits,
+  publishFailure,
+  verifyRunLogRows,
+  checkReviewUnchanged,
+  resolveRunFailure,
+  checkSettings,
+  buildGoogleRequests,
+  googleDownloadUrl,
+  requireRead,
+  parseDriveListing,
+  parseValueRange,
+  parseWorkingTabs,
+  parseSheetMeta,
+  parseAppendedRowNumber,
+  interpretPublishResponse,
   utf8ByteLength,
+  sheetDate,
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = SheetOps;
