@@ -5,6 +5,7 @@
 // Google, and must fail the version tests on a Google that ignores the sheet
 // checks the version guard relies on. SIMULATED: no network.
 
+const os = require('node:os');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -16,11 +17,15 @@ const { FakeGoogle } = require('./support/fake-google.js');
 const { runWorkflow } = require('./support/n8n-sim.js');
 const { week2 } = require('./support/helpers.js');
 
+// Evidence goes to a temporary folder: these tests never touch var/.
+const EVIDENCE_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), 'sheetops-harness-'));
+test.after(() => fs.rmSync(EVIDENCE_ROOT, { recursive: true, force: true }));
+
 async function quietly(argv, hooks) {
   const log = console.log;
   console.log = () => {};
   try {
-    return await main(argv, hooks);
+    return await main(argv.concat(`--evidence-root=${EVIDENCE_ROOT}`), hooks);
   } finally {
     console.log = log;
   }
@@ -299,7 +304,6 @@ test('a fresh baseline version is above every ID seen and the clock rule, and is
 // Unresolved STARTED rows: only evidence settles a publication, never age
 // ---------------------------------------------------------------------------
 
-const os = require('node:os');
 const DRY_START = '2026-11-02T07:00:00.000Z';
 const minutesBefore = (minutes) => new Date(Date.parse(DRY_START) - minutes * 60000).toISOString();
 const AGES = [1, 20, 180, 3 * 24 * 60];

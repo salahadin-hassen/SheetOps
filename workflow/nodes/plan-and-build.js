@@ -21,14 +21,15 @@ function main() {
     const staleRuns = SheetOps.verifyRunLogRows({ runLog: sheet.runLog, runRowNumber, run, batch, staleRuns: selection.stale_runs });
     let plan;
     if (selection.action === 'PROCESS') {
-      const download = SheetOps.requireRead($('Download CSV').first().json, 'DOWNLOAD_FAILED', `Downloading ${batch.name}`);
-      if (typeof download.csv !== 'string') {
-        throw new SheetOps.SheetOpsError('DOWNLOAD_FAILED', `Downloading ${batch.name} returned no text`);
+      SheetOps.requireRead($('Download CSV').first().json, 'DOWNLOAD_FAILED', `Downloading ${batch.name}`);
+      const file = SheetOps.requireRead($('Encode CSV').first().json, 'DOWNLOAD_FAILED', `Reading the downloaded ${batch.name}`);
+      if (typeof file.csv_base64 !== 'string') {
+        throw new SheetOps.SheetOpsError('DOWNLOAD_FAILED', `Downloading ${batch.name} returned no file`);
       }
       plan = SheetOps.processBatch({
         config: prep.config,
         batch,
-        csvText: download.csv,
+        csvBase64: file.csv_base64,
         run,
         sheet,
         options: { confirm_mass_discontinue: selection.confirm_mass_discontinue },

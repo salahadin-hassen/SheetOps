@@ -2,7 +2,7 @@
 
 // A small interpreter for the subset of n8n the SheetOps workflow uses: the
 // manual and schedule triggers, Set 3.4, Code 2 (run once for all items), HTTP
-// Request 4.2, Switch 3.2 in expression mode and Wait. It executes the real
+// Request 4.2, Extract From File 1.1 (base64 only), Switch 3.2 in expression mode and Wait. It executes the real
 // workflow JSON, including the real Code-node source, against a fake Google.
 // Items are passed through JSON between nodes, as n8n does. It is a test
 // double: scripts/verify-in-n8n.js replays recorded runs in the real engine.
@@ -90,6 +90,11 @@ function runWorkflow(workflow, options) {
             continue;
           }
           const property = response.outputPropertyName || 'data';
+          // A file response keeps the input's JSON and adds the bytes as binary.
+          if (response.responseFormat === 'file') {
+            const bytes = Buffer.isBuffer(reply.body) ? reply.body : Buffer.from(String(reply.body), 'utf8');
+            return [[{ json: clone(items[0].json), binary: { [property]: { data: bytes.toString('base64'), mimeType: 'text/csv', fileName: 'file' } } }]];
+          }
           let json;
           if (response.responseFormat === 'text') {
             const text = typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body);
@@ -109,6 +114,15 @@ function runWorkflow(workflow, options) {
       }
       if (node.onError === 'continueRegularOutput') return [[{ json: { error: failure } }]];
       throw new NodeFailure(node.name, failure.message);
+    },
+    'n8n-nodes-base.extractFromFile': (node, items) => {
+      const p = node.parameters;
+      if (p.operation !== 'binaryToPropery') throw new NodeFailure(node.name, 'only binaryToPropery is simulated');
+      const file = items[0].binary && items[0].binary[p.binaryPropertyName];
+      if (file) return [[{ json: { [p.destinationKey]: file.data } }]];
+      const message = `This operation expects the node's input data to contain a binary file '${p.binaryPropertyName}', but none was found [item 0]`;
+      if (node.onError === 'continueRegularOutput') return [[{ json: { error: message } }]];
+      throw new NodeFailure(node.name, message);
     },
     'n8n-nodes-base.switch': (node, items) => {
       const p = node.parameters;

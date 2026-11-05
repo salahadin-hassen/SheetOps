@@ -39,6 +39,11 @@ const DEFAULT_CONFIG = Object.freeze({
   max_price_cents: 1000000000,
   max_name_length: 200,
   max_message_length: 500,
+  // Exceptions.raw_value, sku_raw and message only (§10). Google documents a
+  // limit of 50,000 characters per cell; this stays below it, marker included.
+  max_exception_text_length: 40000,
+  // A supplier value quoted inside a message: leaves room for the explanation.
+  max_quoted_value_length: 39000,
 });
 
 const TABS = Object.freeze({
@@ -189,9 +194,17 @@ function compareKeys(a, b) {
   return 0;
 }
 
+// True when the cut would leave half of a surrogate pair at the end.
+function endsInsidePair(text, length) {
+  const last = text.charCodeAt(length - 1);
+  return last >= 0xd800 && last <= 0xdbff;
+}
+
 function truncate(value, max) {
   const text = cellString(value);
-  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+  if (text.length <= max) return text;
+  const keep = max - 3;
+  return `${text.slice(0, endsInsidePair(text, keep) ? keep - 1 : keep)}...`;
 }
 
 function isRealDate(year, month, day) {
@@ -239,6 +252,102 @@ function utf8ByteLength(text) {
     } else bytes += 3;
   }
   return bytes;
+}
+
+// Strict standard base64, by hand so the core needs neither Buffer nor atob.
+// Returns the bytes, or null if the text is not valid base64.
+function decodeBase64(text) {
+  if (typeof text !== 'string' || text.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(text)) return null;
+  const value = (code) => {
+    if (code >= 65 && code <= 90) return code - 65;
+    if (code >= 97 && code <= 122) return code - 71;
+    if (code >= 48 && code <= 57) return code + 4;
+    return code === 43 ? 62 : 63;
+  };
+  const padding = text.endsWith('==') ? 2 : (text.endsWith('=') ? 1 : 0);
+  const bytes = new Uint8Array((text.length / 4) * 3 - padding);
+  let out = 0;
+  for (let i = 0; i < text.length; i += 4) {
+    const a = value(text.charCodeAt(i));
+    const b = value(text.charCodeAt(i + 1));
+    const c = text[i + 2] === '=' ? 0 : value(text.charCodeAt(i + 2));
+    const d = text[i + 3] === '=' ? 0 : value(text.charCodeAt(i + 3));
+    const triple = (a << 18) | (b << 12) | (c << 6) | d;
+    if (out < bytes.length) bytes[out++] = (triple >> 16) & 255;
+    if (out < bytes.length) bytes[out++] = (triple >> 8) & 255;
+    if (out < bytes.length) bytes[out++] = triple & 255;
+  }
+  return bytes;
+}
+
+// Strict UTF-8 (Unicode Table 3-7): rejects overlong forms, surrogates, values
+// above U+10FFFF and truncated sequences, and never substitutes U+FFFD. An
+// encoded U+FFFD (EF BF BD) in the file is valid UTF-8 and is kept. A leading
+// BOM stays in the text; parseCsv removes it (§1, §3).
+// Returns { text } or { invalid_at: byte offset }.
+function decodeUtf8Strict(bytes) {
+  const parts = [];
+  let units = [];
+  let i = 0;
+  while (i < bytes.length) {
+    const b0 = bytes[i];
+    let length = 1;
+    let low = 0x80;
+    let high = 0xbf;
+    let codePoint = b0;
+    if (b0 >= 0x80) {
+      if (b0 >= 0xc2 && b0 <= 0xdf) { length = 2; codePoint = b0 & 0x1f; }
+      else if (b0 >= 0xe0 && b0 <= 0xef) {
+        length = 3;
+        codePoint = b0 & 0x0f;
+        if (b0 === 0xe0) low = 0xa0;
+        if (b0 === 0xed) high = 0x9f;
+      } else if (b0 >= 0xf0 && b0 <= 0xf4) {
+        length = 4;
+        codePoint = b0 & 0x07;
+        if (b0 === 0xf0) low = 0x90;
+        if (b0 === 0xf4) high = 0x8f;
+      } else return { invalid_at: i };
+      for (let k = 1; k < length; k += 1) {
+        const next = bytes[i + k];
+        if (next === undefined || next < low || next > high) return { invalid_at: i };
+        low = 0x80;
+        high = 0xbf;
+        codePoint = (codePoint << 6) | (next & 0x3f);
+      }
+    }
+    if (codePoint > 0xffff) {
+      const offset = codePoint - 0x10000;
+      units.push(0xd800 + (offset >> 10), 0xdc00 + (offset & 0x3ff));
+    } else units.push(codePoint);
+    if (units.length >= 8192) {
+      parts.push(String.fromCharCode.apply(null, units));
+      units = [];
+    }
+    i += length;
+  }
+  parts.push(String.fromCharCode.apply(null, units));
+  return { text: parts.join('') };
+}
+
+// Exceptions.raw_value, sku_raw and message, the documented exception to verbatim
+// storage (§10). Applied only when a row is written: SKU identity, review IDs,
+// exception IDs and every business decision use the complete value. Keeps the
+// start of the text and says how long it was; never splits a surrogate pair. The
+// result, marker included, is at most `max` UTF-16 units.
+function boundedText(value, max) {
+  const text = cellString(value);
+  if (text.length <= max) return text;
+  let characters = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    const next = text.charCodeAt(i + 1);
+    if (code >= 0xd800 && code <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) i += 1;
+    characters += 1;
+  }
+  const marker = ` [TRUNCATED] original length ${characters} characters`;
+  const keep = max - marker.length;
+  return `${text.slice(0, endsInsidePair(text, keep) ? keep - 1 : keep)}${marker}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -419,11 +528,12 @@ function fieldError(code, field, raw, message) {
 function validateFields(fields, config) {
   const cfg = withDefaults(config);
   const errors = [];
+  const quoted = (value) => boundedText(value, cfg.max_quoted_value_length);
   const skuRaw = cellString(fields.sku);
   const sku = skuRaw.trim().toUpperCase();
   const skuValid = SKU_PATTERN.test(sku);
   if (sku === '') errors.push(fieldError('MISSING_SKU', 'sku', skuRaw, 'SKU is empty'));
-  else if (!skuValid) errors.push(fieldError('INVALID_SKU', 'sku', skuRaw, `SKU "${skuRaw}" does not match the allowed pattern`));
+  else if (!skuValid) errors.push(fieldError('INVALID_SKU', 'sku', skuRaw, `SKU "${quoted(skuRaw)}" does not match the allowed pattern`));
 
   const name = collapseWhitespace(fields.name);
   if (name === '') errors.push(fieldError('MISSING_NAME', 'name', fields.name, 'Name is empty'));
@@ -436,7 +546,7 @@ function validateFields(fields, config) {
   else {
     if (UNIT_ALIASES[unit] !== undefined) unit = UNIT_ALIASES[unit];
     if (!UNITS.includes(unit)) {
-      errors.push(fieldError('UNKNOWN_UNIT', 'unit', fields.unit, `Unit "${cellString(fields.unit).trim()}" is not one of ${UNITS.join(', ')}`));
+      errors.push(fieldError('UNKNOWN_UNIT', 'unit', fields.unit, `Unit "${quoted(cellString(fields.unit).trim())}" is not one of ${UNITS.join(', ')}`));
     }
   }
 
@@ -444,8 +554,8 @@ function validateFields(fields, config) {
   if (price.code) {
     const messages = {
       MISSING_PRICE: 'Price is empty',
-      AMBIGUOUS_PRICE: `Price "${cellString(fields.unit_price).trim()}" may use a decimal comma; not guessed`,
-      INVALID_PRICE: `Price "${cellString(fields.unit_price).trim()}" is not a positive amount with at most 2 decimals`,
+      AMBIGUOUS_PRICE: `Price "${quoted(cellString(fields.unit_price).trim())}" may use a decimal comma; not guessed`,
+      INVALID_PRICE: `Price "${quoted(cellString(fields.unit_price).trim())}" is not a positive amount with at most 2 decimals`,
     };
     errors.push(fieldError(price.code, 'unit_price', fields.unit_price, messages[price.code]));
   }
@@ -454,7 +564,7 @@ function validateFields(fields, config) {
   if (fields.currency !== undefined) {
     currency = cellString(fields.currency).trim().toUpperCase();
     if (currency !== cfg.currency) {
-      errors.push(fieldError('CURRENCY_MISMATCH', 'currency', fields.currency, `Currency "${cellString(fields.currency).trim()}" is not ${cfg.currency}`));
+      errors.push(fieldError('CURRENCY_MISMATCH', 'currency', fields.currency, `Currency "${quoted(cellString(fields.currency).trim())}" is not ${cfg.currency}`));
     }
   }
 
@@ -791,12 +901,16 @@ function selectNextBatch(input) {
     const rows = staleRuns.map((run) => `row ${run.row_number} (run ${run.run_id}, ${run.batch_id})`).join('; ');
     return `Publication outcome unknown for ${rows}`;
   };
+  // Why no run can process it, when the explicit reprocess is not available (§2).
+  const notRecoverable = () => (unresolved.length > 1
+    ? `${unresolvedMessage()}. More than one batch is unresolved, so no run can process either; see the recovery steps in docs/setup.md`
+    : `${unresolvedMessage()}, and that file version is no longer in the inbox. Put it back, or see the recovery steps in docs/setup.md`);
 
   if (params.target_batch_id || params.reprocess_latest) {
     const refuse = (code, message) => result('REFUSED', Object.assign({}, base, { code, message, queue_remaining: queued }));
     const targetId = params.reprocess_latest ? (committed ? committed.batch_id : '') : cellString(params.target_batch_id);
     if (unresolved.length > 0 && !(unresolved.length === 1 && targetId === unresolved[0])) {
-      return refuse('PUBLICATION_UNRESOLVED', `${unresolvedMessage()}; only target_batch_id ${unresolved.join(', ')} can run`);
+      return refuse('PUBLICATION_UNRESOLVED', unresolved.length > 1 ? notRecoverable() : `${unresolvedMessage()}; only target_batch_id ${unresolved[0]} can run`);
     }
     if (targetId === '') return refuse('NOTHING_COMMITTED', 'No batch has been committed yet');
     const version = versions.find((v) => v.batch_id === targetId);
@@ -818,16 +932,16 @@ function selectNextBatch(input) {
     if (cfg.auto_recover_uncertain !== true) {
       return result('BLOCKED', Object.assign({}, base, {
         code: 'PUBLICATION_UNRESOLVED',
-        message: `${unresolvedMessage()}. Its publish outcome is not established and automatic recovery is off. Inspect the evidence listed in docs/setup.md ("An unresolved publication"), then reprocess it explicitly with a manual run, target_batch_id ${unresolved.join(', ')}`,
+        message: pending
+          ? `${unresolvedMessage()}. Its publish outcome is not established and automatic recovery is off. Inspect the evidence listed in docs/setup.md ("An unresolved publication"), then reprocess it explicitly with a manual run, target_batch_id ${unresolved[0]}`
+          : notRecoverable(),
         batch: pending, queue_remaining: queued,
       }));
     }
     if (!pending) {
       return result('BLOCKED', Object.assign({}, base, {
         code: 'PUBLICATION_UNRESOLVED',
-        message: unresolved.length > 1
-          ? `${unresolvedMessage()}. More than one batch is unresolved; see the recovery steps in docs/setup.md`
-          : `${unresolvedMessage()}, and that file version is no longer in the inbox. Put it back, or see the recovery steps in docs/setup.md`,
+        message: notRecoverable(),
         queue_remaining: queued,
       }));
     }
@@ -948,12 +1062,12 @@ function makeException(ctx, row, skuRaw, sku, severity, error, action) {
     batch_id: ctx.batch.batch_id,
     source_file: ctx.batch.name,
     source_row: row,
-    sku_raw: skuRaw,
+    sku_raw: boundedText(skuRaw, ctx.cfg.max_exception_text_length),
     severity,
     code: error.code,
     field: error.field,
-    raw_value: error.raw,
-    message: error.message,
+    raw_value: boundedText(error.raw, ctx.cfg.max_exception_text_length),
+    message: boundedText(error.message, ctx.cfg.max_exception_text_length),
     action,
     _sku: sku,
   };
@@ -1073,11 +1187,30 @@ function processBatch(input) {
   const eff = batch.effective_date;
 
   // File-level checks (§1, §3, §4). Each rejects the whole file.
-  const text = cellString(input.csvText);
-  const bytes = utf8ByteLength(text);
+  // The workflow passes the file's bytes (csvBase64), so an encoding problem is
+  // seen before anything can replace it. csvText is text already decoded.
+  let text;
+  let bytes;
+  let encoded = null;
+  if (input.csvBase64 !== undefined) {
+    encoded = decodeBase64(input.csvBase64);
+    if (encoded === null) throw new SheetOpsError('DOWNLOAD_FAILED', 'The downloaded file did not arrive as valid base64');
+    bytes = encoded.length;
+  } else {
+    text = cellString(input.csvText);
+    bytes = utf8ByteLength(text);
+  }
   if (bytes > cfg.max_file_bytes) {
     return fileRejectionPlan(ctx, [fileProblem('FILE_TOO_LARGE', '', String(bytes),
       `File is ${bytes} bytes; the limit is ${cfg.max_file_bytes}`)], '');
+  }
+  if (encoded !== null) {
+    const decoded = decodeUtf8Strict(encoded);
+    if (decoded.text === undefined) {
+      return fileRejectionPlan(ctx, [fileProblem('INVALID_ENCODING', '', `byte ${decoded.invalid_at}`,
+        `The file is not valid UTF-8 (first invalid byte at offset ${decoded.invalid_at}). No encoding was guessed and nothing was replaced; save the file as UTF-8 and upload it again`)], '');
+    }
+    text = decoded.text;
   }
   let records;
   try {
@@ -1203,6 +1336,10 @@ function processBatch(input) {
     const current = next.get(sku);
     const item = reviews.get(sku);
 
+    if (item && item.firstBatchId === batch.batch_id && !sameProposal(item.proposal, proposal)) {
+      throw new SheetOpsError('REVIEW_INVALID', `Review item ${item.review_id} does not match row ${rep.row} of its own batch; the Review tab was edited by hand`);
+    }
+
     if (!current) {
       if (item) supersede(item);
       next.set(sku, {
@@ -1253,12 +1390,7 @@ function processBatch(input) {
       continue;
     }
 
-    if (item) {
-      if (item.firstBatchId === batch.batch_id) {
-        throw new SheetOpsError('REVIEW_INVALID', `Review item ${item.review_id} does not match row ${rep.row} of its own batch; the Review tab was edited by hand`);
-      }
-      supersede(item);
-    }
+    if (item) supersede(item);
     const reviewId = `RV|${sku}|${batch.batch_id}`;
     addFieldChanges(sku, current, proposal, reviewId, 'HELD', 'HELD_FOR_REVIEW', '');
     outReviews.set(sku, {
@@ -1428,6 +1560,8 @@ function toCell(value) {
     if (!Number.isFinite(value)) throw new SheetOpsError('PLAN_INVALID', `Non-finite number ${value}`);
     return { userEnteredValue: { numberValue: value } };
   }
+  // An operator's TRUE or FALSE in decision or note is kept as read (§8).
+  if (typeof value === 'boolean') return { userEnteredValue: { boolValue: value } };
   // stringValue is stored as text; it is never parsed as a formula.
   return { userEnteredValue: { stringValue: String(value) } };
 }
@@ -1632,6 +1766,7 @@ function checkReviewUnchanged(input) {
     if (!(err instanceof SheetOpsError)) throw err;
     throw new SheetOpsError('REVIEW_READ_FAILED', `${err.detail}. Nothing was published`);
   }
+  if (finalValues.length === 0) throw new SheetOpsError('REVIEW_READ_FAILED', 'The final Review read returned no rows. Nothing was published');
   const decisions = (values) => {
     const items = new Map();
     for (const row of readTable(values, REVIEW_COLUMNS, TABS.review)) {
@@ -1661,6 +1796,64 @@ function checkReviewUnchanged(input) {
     throw new SheetOpsError('REVIEW_CHANGED', `Review changed after the plan was built (${listed}). Nothing was published; the batch must be processed again`);
   }
   return { items: before.size };
+}
+
+// The second part of the final check (§8): every decision cell must hold a
+// value a person typed. `decisionCells` is the spreadsheets.get response for the
+// decision column, read just after `finalRead`. Its userEnteredValue says what
+// a cell holds: formulaValue for a formula, and nothing at all for a cell filled
+// by an array formula elsewhere. A displayed value alone cannot show either.
+// Anything that is not provably literal stops the publish, which would otherwise
+// store the computed value as if it had been typed.
+function checkReviewDecisionsLiteral(input) {
+  const unreadable = (why) => new SheetOpsError('REVIEW_READ_FAILED', `${why}. Nothing was published`);
+  const decisionColumn = REVIEW_COLUMNS.indexOf('decision');
+  let values;
+  let body;
+  try {
+    values = parseValueRange(input.finalRead, 'the Review tab for the final check');
+    body = requireRead(input.decisionCells, 'READ_FAILED', 'Reading the Review decision cells');
+  } catch (err) {
+    if (!(err instanceof SheetOpsError)) throw err;
+    throw unreadable(err.detail);
+  }
+  const sheets = body.sheets;
+  const grids = Array.isArray(sheets) && sheets.length === 1 && sheets[0] ? sheets[0].data : null;
+  if (!Array.isArray(grids) || grids.length !== 1 || !grids[0]) throw unreadable('The decision-cell read did not return one grid');
+  const grid = grids[0];
+  if ((grid.startRow !== undefined && grid.startRow !== 0) || grid.startColumn !== decisionColumn) {
+    throw unreadable('The decision-cell read returned a different range');
+  }
+  const rowData = grid.rowData === undefined ? [] : grid.rowData;
+  if (!Array.isArray(rowData)) throw unreadable('The decision-cell read is malformed');
+
+  const blank = (value) => value === undefined || value === null || value === '';
+  const problems = [];
+  const total = Math.max(rowData.length, values.length);
+  for (let r = 0; r < total; r += 1) {
+    const cells = rowData[r] && Array.isArray(rowData[r].values) ? rowData[r].values : [];
+    const cell = cells[0] || {};
+    const shown = Array.isArray(values[r]) ? values[r][decisionColumn] : undefined;
+    const typed = cell.userEnteredValue;
+    let why = '';
+    if (typed === undefined || typed === null) {
+      if (!blank(shown) || cell.effectiveValue !== undefined) why = 'shows a value nobody typed there (an array formula elsewhere can do this)';
+    } else {
+      const keys = Object.keys(typed);
+      if (keys.includes('formulaValue')) why = 'holds a formula';
+      else if (keys.length !== 1 || !['stringValue', 'numberValue', 'boolValue'].includes(keys[0])) why = 'holds something other than a typed value';
+      else if (!(blank(typed[keys[0]]) && blank(shown)) && typed[keys[0]] !== shown) why = 'does not match the value read for that row';
+    }
+    if (why !== '') {
+      const sku = Array.isArray(values[r]) ? cellString(values[r][REVIEW_COLUMNS.indexOf('sku')]) : '';
+      problems.push(`row ${r + 1}${sku ? ` (${sku})` : ''} ${why}`);
+    }
+  }
+  if (problems.length > 0) {
+    const listed = problems.slice(0, 5).join('; ') + (problems.length > 5 ? `; and ${problems.length - 5} more` : '');
+    throw new SheetOpsError('REVIEW_DECISION_NOT_LITERAL', `A decision must be typed by a person: ${listed}. Nothing was published; replace the cell with typed text, then process the batch again`);
+  }
+  return { rows: total };
 }
 
 // Decides what this run may write after a failure (§12). `rowRead` is the
@@ -1694,7 +1887,7 @@ function resolveRunFailure(input) {
     }
     return {
       outcome: 'UNKNOWN', write: null, run_status: runStatus, code: 'PUBLISH_OUTCOME_UNKNOWN',
-      message: `${failure.message}; after the wait, row ${n} ${shows}. Nothing was written; the next run reconciles it once 15 minutes have passed`,
+      message: `${failure.message}; after the wait, row ${n} ${shows}. Nothing was written. It stays unresolved until its row shows a final status or a person reprocesses it after inspecting the evidence (docs/setup.md, "An unresolved publication")`,
     };
   }
   if (ours && facts.status === 'STARTED') {
@@ -1762,6 +1955,7 @@ function buildGoogleRequests(settings) {
   const cfg = withDefaults({ supplier: s.supplier, currency: s.currency });
   const sheet = `${SHEETS_API}/${s.spreadsheet_id}`;
   const values = READ_OPTIONS;
+  const decisionLetter = columnLetter(REVIEW_COLUMNS.indexOf('decision') + 1);
   const working = [
     [TABS.catalog, `A1:${columnLetter(CATALOG_COLUMNS.length)}`],
     [TABS.review, `A1:${columnLetter(REVIEW_COLUMNS.length)}`],
@@ -1786,6 +1980,12 @@ function buildGoogleRequests(settings) {
     read_working_tabs: `${sheet}/values:batchGet?${working.map(([tab, cells]) => `ranges=${encodeURIComponent(a1(tab, cells))}`).join('&')}&${values}`,
     // The final Review check, just before the publish (§8): the same range as step 6.
     read_review: `${sheet}/values/${encodeURIComponent(a1(TABS.review, working[1][1]))}?${values}`,
+    // What each decision cell holds, not what it shows (§8). A field mask makes
+    // Google return grid data for the range.
+    read_review_decisions: `${sheet}?${queryString({
+      ranges: a1(TABS.review, `${decisionLetter}1:${decisionLetter}`),
+      fields: 'sheets(data(startRow,startColumn,rowData(values(userEnteredValue,effectiveValue))))',
+    })}`,
     batch_update: `${sheet}:batchUpdate`,
   };
 }
@@ -1945,6 +2145,10 @@ const SheetOps = {
   publishFailure,
   verifyRunLogRows,
   checkReviewUnchanged,
+  checkReviewDecisionsLiteral,
+  decodeUtf8Strict,
+  decodeBase64,
+  boundedText,
   resolveRunFailure,
   checkSettings,
   buildGoogleRequests,

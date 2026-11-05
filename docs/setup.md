@@ -68,7 +68,10 @@ Note the account's email address (`...@...iam.gserviceaccount.com`).
    - Turn on **Set up for use in HTTP Request node** and enter these scopes:
      `https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.readonly`
 2. **Workflows → Import from file**: `workflow/sheetops.workflow.json`.
-   The eleven Google nodes refer to the credential by that exact name. If a node
+   **If an earlier version is already imported, it is out of date.** Delete it in
+   n8n first (the runner refuses two workflows with the same name), import this
+   file, then repeat step 3. Do not activate it.
+   The twelve Google nodes refer to the credential by that exact name. If a node
    still shows no credential, select it on that node.
 3. Open **Settings** and replace `PASTE_SPREADSHEET_ID` and `PASTE_FOLDER_ID`.
 4. Do **not** activate the workflow yet. Run it with **Test workflow** while the
@@ -104,7 +107,7 @@ Expected state at each stage:
 
 **Your part, in the n8n UI (T-UI, T-LIVE-1).**
 
-1. Open the imported workflow. Open each of the eleven Google nodes and check
+1. Open the imported workflow. Open each of the twelve Google nodes and check
    that **Credential** shows `SheetOps Google service account`:
    - List inbox
    - Read Run Log
@@ -114,6 +117,7 @@ Expected state at each stage:
    - Read sheet metadata
    - Read working tabs
    - Re-read Review
+   - Read Review decisions
    - Publish
    - Read run row
    - Write FAILED row
@@ -190,7 +194,7 @@ How the runner works:
 
 | Test | What happens | Pass when |
 |---|---|---|
-| T-UI | Read n8n's records of your import and run | All eleven Google nodes reference the credential by its ID, the workflow is inactive, and a successful manual run published week 2 |
+| T-UI | Read n8n's records of your import and run | All twelve Google nodes reference the credential by its ID, the workflow is inactive, and a successful manual run published week 2 |
 | T-LIVE-1 | Snapshot after your UI run | Catalog, Review, Changes and Exceptions equal `fixtures/week2/expected/` (with the real Drive file ID in the batch IDs); one Run Log row with the expected counts; a hidden version tab |
 | T-ATOM-1 | A valid publish with one invalid request appended | HTTP 400, and the full snapshot is unchanged (tabs, grid sizes, version tab) |
 | T-ATOM-2 | The same publish without the invalid request | HTTP 200, and the full snapshot equals the oracle: the fake Google applying the same request to the before-snapshot |
@@ -199,6 +203,18 @@ How the runner works:
 | T-VERSION-2 | Eight trials, each from its own verified baseline: two different publishes planned from that baseline's version, sent in one HTTP Request node run, so both are in flight at once | In every trial exactly one gets HTTP 200. The final snapshot equals the oracle for the winner alone and is still the same 20 s later; the loser's row is still `STARTED`; no duplicate IDs; version IDs never go backwards. The responses, `date` headers and timings are recorded for each trial |
 | T-LOST-A | The Publish timeout shortened until the reply is lost although Google applied the request (several timeouts are tried) | **Done** reports the committed status, `Write FAILED row` never runs, the tabs equal T-LIVE-1, and the next run is `IDLE` and sends no publish |
 | T-LOST-B | Publish addressed to `sheets.googleapis.invalid`, so it provably never reaches Google | SheetOps reports `PUBLISH_OUTCOME_UNKNOWN`, because it cannot know, and only the `STARTED` row changed. The runner's ledger records it as not submitted. A run one minute later is `WAIT`; after 16 minutes the scheduled run is `BLOCKED` (`PUBLICATION_UNRESOLVED`) and publishes nothing. An explicit reprocess with `target_batch_id` then recovers: the old row is `INTERRUPTED`, week 2 is published once, and its data writes equal the original's in a new request |
+
+**Two checks by hand: the runner does not automate these yet.** Each one needs
+the owner's go-ahead like the rest, and neither has been run.
+
+| Test | Steps, on the synthetic sheet only | Pass when |
+|---|---|---|
+| T-ENCODING | Upload a copy of the week-2 CSV saved as Windows-1252 with a non-ASCII name, named for a later date. Run once by hand. Then repeat with a UTF-8 file that has a BOM and non-ASCII names | The first ends `REJECTED_FILE` (`INVALID_ENCODING`): one Exceptions row and no other tab changed. The second publishes with the names intact. **Encode CSV** holds base64 in both |
+| T-FORMULA | With a Review item open, run a manual `reprocess_latest` after each of: (a) typing `APPROVE`; (b) `=UPPER("approve")` in the decision cell; (c) `=IF(FALSE,"APPROVE","")`; (d) an array formula in an upper decision cell, for example `=ARRAYFORMULA({"APPROVE";"APPROVE"})`, that fills the cell below it. Reset between cases | (a) applies. (b), (c) and (d) end `FAILED` (`REVIEW_DECISION_NOT_LITERAL`), send no publish, leave the cell as it was and change no catalog value. **Read Review decisions** shows `userEnteredValue.formulaValue` for (b) and (c), and for (d) no `userEnteredValue` on the filled cell |
+
+If Google's response has a different shape, for example no `startColumn`, every
+publish that writes Review stops with `REVIEW_READ_FAILED`: safe, but a fix is
+needed before going further.
 
 **Concurrency evidence is partly indirect.** That both requests are in
 flight at once comes from n8n's source code: HTTP Request 4.2 starts every
@@ -306,6 +322,11 @@ older snapshot, and Run Log could show two committed rows for the batch.
 Changes and Exceptions would still not repeat rows: they are written at fixed
 ranges. Note in Review or in your own records what you inspected and why you
 reprocessed.
+
+**More than one batch unresolved.** SheetOps refuses every run, scheduled or
+manual, because neither batch can safely overtake the other. It offers no
+automatic way out: inspect both as above and treat any manual Run Log change as
+the forced recovery described below.
 
 **Never type `FAILED` or `INTERRUPTED` over the row by hand.** That claims an
 outcome no evidence established. SheetOps would then move on to newer files

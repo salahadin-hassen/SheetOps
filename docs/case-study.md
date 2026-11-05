@@ -1,10 +1,11 @@
 # SheetOps: a case study in safe supplier price-list automation
 
-> **Status at a glance (27 October 2026).** The processing core and the n8n
+> **Status at a glance (5 November 2026).** The processing core and the n8n
 > workflow are built and tested **offline**, and replayed in a real n8n engine
 > with **recorded** Google responses. **Nothing has run against a real Google
-> spreadsheet yet.** The operator console shown later is a **design concept and
-> clickable prototype**, not a working frontend. All data is synthetic; no
+> spreadsheet yet.** A read-only operator console now exists on **offline demo
+> data**; the screenshots in this document show the earlier **design concept**,
+> not that build. SheetOps is not production-ready. All data is synthetic; no
 > business uses SheetOps today.
 
 ## 1. Executive summary
@@ -62,7 +63,9 @@ SheetOps is built around four properties instead:
 **Bounded scope (version one).** One supplier and one spreadsheet. CSV only.
 One currency (ETB). Up to 2,000 rows per file, 2,000 catalog rows and 50 files
 in the inbox. APPROVE is the only review decision (there is no reject). There
-is no frontend: operators work in the Google Sheet itself.
+is no frontend: operators work in the Google Sheet itself. (That remains the
+version-one decision. A read-only console was later added as a deliberate scope
+expansion; see section 6.)
 
 ## 3. Solution architecture
 
@@ -88,9 +91,10 @@ The same input always produces the same output, which is what makes it
 testable.
 
 The importable workflow (`workflow/sheetops.workflow.json`) is generated from
-the core by `workflow/build.js`. It has 31 nodes: a schedule (every two hours,
-08:00–18:00) and a manual trigger, 7 Code nodes (6 embed the core), 11 HTTP
-Request nodes for Google, 6 Switch nodes, and a 20-second Wait used to
+the core by `workflow/build.js`. It has 33 nodes: a schedule (every two hours,
+08:00–18:00) and a manual trigger, 7 Code nodes (6 embed the core), 12 HTTP
+Request nodes for Google, an Extract From File node that passes the download's
+exact bytes to the core, 6 Switch nodes, and a 20-second Wait used to
 re-check an uncertain publish. It is exported **inactive** and contains no
 credentials.
 
@@ -209,31 +213,39 @@ automatic recovery stays off by design.
 
 ## 5. Engineering evidence and its provenance
 
-"Verified here" means re-run while preparing this document, on 27 October
+"Verified here" means re-run for this document, most recently on 5 November
 2026, with Node.js v24.21.0. "Reported" means a result from earlier work that
 was not re-run for this document.
 
 | Claim | Result | Source | Status |
 |---|---|---|---|
 | M1 baseline (commit `4addaa1`) offline tests | 76 / 76 pass | `npm test` on a read-only export of the commit | **Verified here** |
-| Current M2 working tree offline tests | 171 / 171 pass, about 5 s | `npm test`, re-run 29 Oct after contract v2.5 | **Verified here** |
-| End-to-end simulator scenarios | 31 | Counted in `test/simulate.test.js`; included in the 171 | **Verified here** |
-| Real n8n 2.41.7 replay | 14 / 14 scenarios match the simulator node for node; the production workflow (31 nodes) survives an import/export round trip | `npm run verify:n8n` (recorded responses, no Google, about 2 minutes) | **Verified here** |
-| Mass-discontinuation boundary | 3/10 proceeds, 4/10 halts | `test/safety.test.js`, part of the 171 | **Verified here** |
+| M2 commit (`eeac3a1`, branch `m2-frontend`, not merged) offline tests | 171 / 171 pass | `npm test`, 4 Nov | **Verified here** |
+| With the later runner, audit and contract v2.6 changes | 252 / 252 pass, about 15 s | `npm test`, 5 Nov | **Verified here** |
+| Operator console on demo data | 169 / 169 tests; typecheck and production build pass; browser check of 350 page loads at five widths with no overflow or console errors | `frontend/`, 5 Nov | **Verified here; offline only** |
+| End-to-end simulator scenarios | 31 | Counted in `test/simulate.test.js`; included in the root suite | **Verified here** |
+| Real n8n 2.41.7 replay | 16 / 16 scenarios match the simulator node for node; the production workflow (33 nodes) survives an import/export round trip | `npm run verify:n8n` (recorded responses, no Google, about 6 minutes on 5 Nov), which also passes its built-in checks | **Verified here** |
+| Mass-discontinuation boundary | 3/10 proceeds, 4/10 halts | `test/safety.test.js`, part of the root suite | **Verified here** |
 | Mutation testing | 40 / 40 defects caught; unmutated control passes | Earlier run of a script kept outside the repository | **Reported, not reproduced.** A reconstructed copy of the script has known defects and has not been accepted |
+| Mutation check | 35 / 35 selected defects caught, on 5 Nov | `scripts/mutation/run.js`; a selected list, not a measure of coverage | **Verified here; offline only** |
 | Live Google Sheets / Drive tests | — | `scripts/live/run-live-tests.js`, plan in `docs/setup.md` §5 | **Not run** |
 
-The README and `docs/requirements.md` (FR-015) state the same counts: 14
-replay scenarios, 31 simulator scenarios, about 5 seconds offline and about
-2 minutes for the replay.
+The README and `docs/requirements.md` (FR-015) state the same scenario counts:
+16 replay scenarios and 31 simulator scenarios. All of this is offline or
+simulated evidence, not proof of live Google integration.
 
 ## 6. UI/UX design concept
 
 **What it is.** A separately designed operator console, published as a design
 canvas with an interactive prototype (version 16, artifact version ID
 `1793131375-cbca`). It explores how an operator would see and act on what
-SheetOps does. **It is not implemented**: in version one, operators use the
-Google Sheet directly. The canvas is **private** to its owner. Until a
+SheetOps does. **This design is not the product**: in version one, operators use
+the Google Sheet directly. A read-only console was later built from a newer design
+version as a deliberate scope expansion (`frontend/`): Overview, Runs, Run details,
+Review, Exceptions, Incoming files (recorded files only), Catalog, Change history and
+Connection, on offline demo data. It has no approval controls, no view of the live
+Drive inbox and no live Google data. The
+screenshots below come from the version-16 design, not from that build. The canvas is **private** to its owner. Until a
 deliberate decision is made to share it, show the screenshots below, or walk
 through the prototype live on a call.
 
@@ -311,11 +323,15 @@ illustrative; product data is the synthetic fixture.
 | Area | Status |
 |---|---|
 | Deterministic core (M1) | Implemented; committed (`4addaa1`) |
-| n8n workflow, simulator, replay, live-test harness (M2) | Implemented and tested offline; **not yet committed** |
+| n8n workflow, simulator, replay, live-test harness (M2) | Implemented and tested offline; committed on `m2-frontend`, **not merged** to `main` |
 | Live Google Sheets and Drive behaviour | **Untested**: atomicity, the version check, lost responses and credentials have not touched a real spreadsheet |
 | Concurrent publishes | Undocumented by Google; covered only by a planned live test (T-VERSION-2) |
 | Review edits during a run | Since contract v2.5 a final Review read just before the publish aborts the run (`FAILED`, `REVIEW_CHANGED`) if any decision or note changed. An edit saved after that final read can still be lost (Google Sheets has no conditional write); the item then shows its earlier decision and nothing is applied |
-| Operator console | Design concept and prototype only |
+| Operator console | Read-only build tested on offline demo data (169 / 169). The live Drive inbox and live data not implemented. Approval remains design only |
+| Manual synthetic workflow run | **Not established**. The current workflow must be imported first |
+| Typed-decision and strict-encoding checks | Implemented and tested offline and in replay; **real Google responses not observed** (T-FORMULA, T-ENCODING) |
+| Google credential and workflow settings | **Not verified as configured**: when last read on 4 November, n8n's database held no credential and no executions |
+| Synthetic spreadsheet, inbox and sharing | **Reported by the owner; not independently verified** |
 | Failure drills and handover documentation (M3) | Not started |
 
 ## 8. Next milestones
@@ -358,8 +374,8 @@ This walkthrough is reproducible offline today. Steps 5 and 6 are explicitly
 2. **The expected result, by hand.** `fixtures/README.md` gives every row's
    outcome and the arithmetic. 19 rows = 6 accepted + 1 collapsed + 5
    rejected + 3 held as conflicting + 3 held for review + 1 blank.
-3. **Run the tests.** `npm test` (no installation, no network): 171 pass,
-   including the exact match with the hand-calculated catalog, changes,
+3. **Run the tests.** `npm test` (no installation, no network): all pass (252
+   on 5 November), including the exact match with the hand-calculated catalog, changes,
    exceptions and run row.
 4. **Approve and apply.** The tests show EGG-030 held at 300.00, approved, then
    applied at 420.00 by a later run, with an `APPLIED_AFTER_REVIEW` history
@@ -368,9 +384,10 @@ This walkthrough is reproducible offline today. Steps 5 and 6 are explicitly
    (recorded as `FAILED`, nothing applied), a 503 (unknown, nothing written,
    later runs blocked) and a publish that lands late (row and data agree).
    These use a fake Google.
-6. **Replay in real n8n.** `npm run verify:n8n` replays 14 scenarios in n8n
+6. **Replay in real n8n.** `npm run verify:n8n` replays 16 scenarios in n8n
    2.41.7 with recorded responses.
-7. **Show the operator's view.** Walk through the prototype: incoming file →
+7. **Show the operator's view.** Open the read-only console in `frontend/` on its
+   demo scenarios, or walk through the design prototype: incoming file →
    validation → review → approval (blue, catalog still 300.00) → publication
    (choose applied, refused or unknown) → audit trail.
 8. **End honestly.** The result is verified offline and in replay. Whether

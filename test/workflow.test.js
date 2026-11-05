@@ -94,7 +94,8 @@ test('the failure path: every failure reads the run row first; FAILED is written
   // after "Check Review" passes; rejected and halted plans publish directly.
   const outputs = (name) => workflow.connections[name].main.map((links) => links.map((link) => link.node));
   assert.deepEqual(outputs('Publish or record failure'), [['Re-read Review'], ['Read run row'], ['Publish']]);
-  assert.deepEqual(outputs('Re-read Review'), [['Check Review']]);
+  assert.deepEqual(outputs('Re-read Review'), [['Read Review decisions']]);
+  assert.deepEqual(outputs('Read Review decisions'), [['Check Review']]);
   assert.deepEqual(outputs('Check Review'), [['Review unchanged?']]);
   assert.deepEqual(outputs('Review unchanged?'), [['Publish'], ['Read run row']]);
   assert.deepEqual(into('Publish'), ['Publish or record failure', 'Review unchanged?']);

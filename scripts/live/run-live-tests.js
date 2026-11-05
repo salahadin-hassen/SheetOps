@@ -14,6 +14,14 @@
 // the harness detects a failed version check), --reps=N (T-VERSION-2, default 8),
 // reconcile only: --declare=<entry id or run:<run id>>:not-applied --reason="...".
 //
+// --evidence-root=<dir> (dry runs only) keeps evidence outside var/live.
+//
+// Exit codes: 0 only when every test the selected phases require has passed
+// (a single phase is reported as PARTIAL VERIFICATION, never as the full suite); 1 when any result is failed,
+// inconclusive, errored, skipped when required, missing or malformed; 2 when
+// the runner could not start or report. See report.js. report.json records the
+// same assessment under "summary".
+//
 // Every write is recorded first in a ledger (var/live/ledger-<spreadsheet>.json).
 // The runner resets or publishes only when every earlier publication is
 // established, by evidence, as not submitted, rejected or committed. Age is
@@ -32,6 +40,7 @@ const core = require('../../src/sheetops-core.js');
 const { FakeGoogle } = require('../../test/support/fake-google.js');
 const { CREDENTIAL_NAME } = require('../../workflow/build.js');
 const L = require('./lib.js');
+const R = require('./report.js');
 
 const PRODUCTION_NAME = 'SheetOps: supplier price list reconciliation';
 const FIXTURES = path.join(L.ROOT, 'fixtures', 'week2');
@@ -87,12 +96,19 @@ function parseArgs(argv) {
     if (a === '--dry-run') args.dry = true;
     else if (a === '--broken-google') { args.dry = true; args.broken = true; }
     else if (a.startsWith('--reps=')) args.reps = Number(a.slice(7));
+    else if (a.startsWith('--evidence-root=')) args.evidenceRoot = a.slice(16);
     else if (a.startsWith('--declare=')) args.declare.push(a.slice(10));
     else if (a.startsWith('--reason=')) args.reason = a.slice(9);
     else throw new Error(`Unknown option ${a}`);
   }
   if (!['check', 'harness', 'recovery', 'all', 'reconcile'].includes(args.phase)) throw new Error(`Unknown phase ${args.phase}`);
   if (args.declare.length > 0 && args.phase !== 'reconcile') throw new Error('--declare is only accepted by the reconcile phase');
+  // Zero or unparsable reps would otherwise run no trials and report a pass.
+  if (!Number.isInteger(args.reps) || args.reps < 1) throw new Error('--reps must be a positive whole number');
+  if (!args.dry && ['harness', 'all'].includes(args.phase) && args.reps < R.MIN_LIVE_VERSION_TRIALS) {
+    throw new Error(`A live T-VERSION-2 needs at least ${R.MIN_LIVE_VERSION_TRIALS} trials; --reps=${args.reps} would not give a verdict, and would reset the spreadsheet for nothing`);
+  }
+  if (args.evidenceRoot !== undefined && !args.dry) throw new Error('--evidence-root is only accepted with --dry-run or --broken-google');
   return args;
 }
 
@@ -127,7 +143,7 @@ function readN8nDatabase() {
 
 function makeContext(args, hooks) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const recorder = new Recorder(path.join(L.ROOT, 'var', 'live', `${args.dry ? (args.broken ? 'dry-broken' : 'dry') : 'live'}-${stamp}`));
+  const recorder = new Recorder(path.join(args.evidenceRoot ? path.resolve(args.evidenceRoot) : path.join(L.ROOT, 'var', 'live'), `${args.dry ? (args.broken ? 'dry-broken' : 'dry') : 'live'}-${stamp}`));
   if (args.dry && hooks.google) {
     // Tests continue with a spreadsheet an earlier dry run left behind.
     const transport = L.dryTransport({ google: hooks.google, hooks: hooks.transport, start: hooks.start });
@@ -394,6 +410,13 @@ const winnerOf = (replies) => replies.map((r, k) => (r.status === 200 ? k : -1))
 // How long to wait before re-reading, to see whether anything landed late.
 const SETTLE_MS = 20000;
 
+// T-VERSION-2's verdict from its trials. Too few trials is never a pass.
+function versionVerdict(trials, { reps, live }) {
+  if (trials.some((r) => r.verdict === 'FAIL')) return 'FAIL';
+  const needed = Math.max(1, reps, live ? R.MIN_LIVE_VERSION_TRIALS : 1);
+  return trials.length < needed || trials.some((r) => r.verdict !== 'PASS') ? 'INCONCLUSIVE' : 'PASS';
+}
+
 async function phaseHarness(ctx) {
   const formula = '=HYPERLINK("http://example.com","x")';
 
@@ -541,11 +564,7 @@ async function phaseHarness(ctx) {
     }
   } finally {
     ctx.recorder.save('T-VERSION-2', 'summary', { trials, solo_publish_node_ms: soloMs });
-    const failed = trials.filter((r) => r.verdict === 'FAIL');
-    const inconclusive = trials.filter((r) => r.verdict === 'INCONCLUSIVE');
-    let verdict = 'PASS';
-    if (failed.length > 0) verdict = 'FAIL';
-    else if (inconclusive.length > 0 || trials.length < ctx.args.reps) verdict = 'INCONCLUSIVE';
+    const verdict = versionVerdict(trials, { reps: ctx.args.reps, live: ctx.transport.kind === 'live' });
     ctx.recorder.result('T-VERSION-2', verdict, {
       summary: [
         `${trials.length} of ${ctx.args.reps} trials ran, each from its own verified baseline; baselines ${trials.map((r) => r.baseline).join(',')}`,
@@ -791,34 +810,50 @@ async function main(argv, hooks) {
   const ctx = makeContext(args, hooks || {});
   console.log(`SheetOps live tests (${ctx.transport.kind}${args.broken ? ', Google sheet checks OFF' : ''}): evidence in ${path.relative(L.ROOT, ctx.recorder.dir)}`);
   const phases = args.phase === 'all' ? ['check', 'harness', 'recovery'] : [args.phase];
+  // hooks.phases: offline tests script a phase's results to check the reporting.
+  const phaseFns = Object.assign({ check: phaseCheck, harness: phaseHarness, recovery: phaseRecovery, reconcile: phaseReconcile }, ctx.hooks.phases);
   for (const phase of phases) {
     try {
-      await { check: phaseCheck, harness: phaseHarness, recovery: phaseRecovery, reconcile: phaseReconcile }[phase](ctx);
+      await phaseFns[phase](ctx);
     } catch (err) {
       ctx.recorder.result(`phase ${phase}`, 'ERROR', { problems: [err.message] });
       break;
     }
   }
   const declared = ctx.ledger.forSheet().filter((e) => e.outcome === 'unknown' && e.operator);
+  const unresolved = ctx.ledger.forSheet().filter((e) => e.outcome === 'unknown' && !e.operator).map((e) => ({ id: e.id, label: e.label, run_id: e.run_id, basis: e.basis }));
+  const summary = R.assess({ results: ctx.recorder.results, phases, transport: ctx.transport.kind, ledgerUnresolved: unresolved });
+  // Written before anything is printed: a failed write ends in exit 2, never a pass.
   const report = ctx.recorder.finish({
-    transport: ctx.transport.kind, broken_google: args.broken, phases, settings: ctx.settings, evidence_dir: ctx.recorder.dir,
+    transport: ctx.transport.kind, broken_google: args.broken, phases, reps: args.reps, settings: ctx.settings, evidence_dir: ctx.recorder.dir,
     ledger_file: ctx.ledger.file,
-    unresolved: ctx.ledger.forSheet().filter((e) => e.outcome === 'unknown' && !e.operator).map((e) => ({ id: e.id, label: e.label, run_id: e.run_id, basis: e.basis })),
+    unresolved,
     operator_declarations: declared.map((e) => ({ id: e.id, label: e.label, run_id: e.run_id, declaration: e.operator })),
+    ok: summary.exit_code === 0,
+    summary,
   });
   if (declared.length > 0) console.log(`\nOperator-declared outcomes (unverified by evidence): ${declared.map((e) => e.id).join(', ')}`);
-  const bad = report.results.filter((r) => ['FAIL', 'ERROR', 'UNRESOLVED'].includes(r.verdict));
-  const versionFailed = report.results.some((r) => r.id.startsWith('T-VERSION') && r.verdict !== 'PASS' && r.verdict !== 'PASS*');
-  if (versionFailed) console.log('\nVERSION CHECK NOT CONFIRMED: keep auto_recover_uncertain off (contract §2); every uncertain publication needs an operator.');
-  console.log(bad.length === 0 ? '\nNo failures.' : `\n${bad.length} failure(s).`);
-  report.ok = bad.length === 0;
+  const versionNotConfirmed = summary.required.some((id) => id.startsWith('T-VERSION') && !summary.passed.includes(id));
+  if (versionNotConfirmed) console.log('\nVERSION CHECK NOT CONFIRMED: keep auto_recover_uncertain off (contract §2); every uncertain publication needs an operator.');
+  for (const line of R.summaryLines(summary, { transport: ctx.transport.kind, declared: declared.length })) console.log(line);
+  console.log(`Report: ${path.join(ctx.recorder.dir, 'report.json')}`);
   return report;
 }
 
-if (require.main === module) {
-  main(process.argv.slice(2))
-    .then((report) => { process.exitCode = report.ok ? 0 : 1; })
-    .catch((err) => { console.error(err.stack || err.message); process.exitCode = 2; });
+// The command line: resolves to the process exit code. Only a report that
+// explicitly says it passed gives 0.
+async function cli(argv, hooks) {
+  try {
+    const report = await main(argv, hooks);
+    return report && report.ok === true && report.summary && report.summary.exit_code === 0 ? 0 : 1;
+  } catch (err) {
+    console.error(err.stack || err.message);
+    return 2;
+  }
 }
 
-module.exports = { main, parseArgs };
+if (require.main === module) {
+  cli(process.argv.slice(2)).then((code) => { process.exitCode = code; });
+}
+
+module.exports = { main, parseArgs, cli, versionVerdict };

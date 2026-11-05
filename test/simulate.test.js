@@ -66,8 +66,9 @@ test('happy path: one scheduled run publishes exactly the hand-calculated week-2
   const google = newGoogle();
   const result = run(google);
   assert.equal(result.error, null);
-  assert.deepEqual(kinds(google), ['DRIVE_LIST', 'VALUES_GET', 'VALUES_APPEND', 'DRIVE_GET', 'SHEETS_META', 'VALUES_BATCH_GET', 'VALUES_GET', 'BATCH_UPDATE']);
+  assert.deepEqual(kinds(google), ['DRIVE_LIST', 'VALUES_GET', 'VALUES_APPEND', 'DRIVE_GET', 'SHEETS_META', 'VALUES_BATCH_GET', 'VALUES_GET', 'SHEETS_CELLS', 'BATCH_UPDATE']);
   assert.equal(google.log[6].node, 'Re-read Review', 'the final Review check comes right before the publish');
+  assert.equal(google.log[7].node, 'Read Review decisions');
   assert.deepEqual([result.done.action, result.done.run_status], ['PROCESS', 'SUCCESS_WITH_EXCEPTIONS']);
   assert.deepEqual(google.table('Catalog'), w.expected.catalog);
   assert.deepEqual(google.table('Review'), w.expected.review);
@@ -436,8 +437,8 @@ test('the final Review check: an approval saved after the tab read aborts the ru
   assert.deepEqual([aborted.done.run_status, aborted.done.code], ['FAILED', 'REVIEW_CHANGED']);
   assert.match(aborted.done.message, /RV\|TEA-001\|\S*: decision changed.*Nothing was published/);
   assert.ok(!publishSent(google), 'no publish request was sent');
-  assert.deepEqual(google.log.slice(-3).map((e) => [e.kind, e.node]),
-    [['VALUES_GET', 'Re-read Review'], ['VALUES_GET', 'Read run row'], ['VALUES_UPDATE', 'Write FAILED row']]);
+  assert.deepEqual(google.log.slice(-4).map((e) => [e.kind, e.node]),
+    [['VALUES_GET', 'Re-read Review'], ['SHEETS_CELLS', 'Read Review decisions'], ['VALUES_GET', 'Read run row'], ['VALUES_UPDATE', 'Write FAILED row']]);
   assert.deepEqual(runLogRows(google), [['1', 'SUCCESS_WITH_EXCEPTIONS', ''], ['2', 'FAILED', 'REVIEW_CHANGED']]);
   assert.equal(reviewCells(google).get(tea)[DECISION], 'APPROVE', 'the operator\'s approval is kept, not overwritten');
   assert.equal(google.table('Catalog').find((r) => r.sku === 'TEA-001').unit, 'pack', 'and not yet applied');

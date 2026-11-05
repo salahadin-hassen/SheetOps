@@ -12,9 +12,10 @@ for a person to approve, and keeps an append-only record of what changed and
 why. It also refuses to guess: when a Google update times out, the run is
 reported as "outcome unknown" rather than "failed", and later updates wait
 until someone checks. The business rules live in one dependency-free
-JavaScript module, orchestrated by n8n and covered by 171 offline tests. A
-replay in the real n8n engine matches all 14 recorded scenarios. Live Google
-testing is the next milestone; all data is synthetic.
+JavaScript module, orchestrated by n8n and covered by 252 offline tests. A
+replay in the real n8n engine matches all 16 recorded scenarios, using recorded
+responses. Nothing has been verified against live Google yet, and it is not
+production-ready; all data is synthetic.
 
 ## Upwork portfolio entry
 
@@ -36,10 +37,10 @@ Google Sheets catalog without letting bad data through:
 
 **Built with:** n8n, Google Sheets and Drive APIs, JavaScript (Node.js).
 
-**Evidence:** 171 offline tests; 14/14 scenarios replayed in n8n 2.41.7 with
+**Evidence:** 252 offline tests; 16/16 scenarios replayed in n8n 2.41.7 with
 recorded Google responses. Live Google tests are planned, not yet run.
-Includes an operator-console design concept and clickable prototype (not a
-production frontend).
+Includes a read-only operator console (169 tests) on offline demo data; it is
+not connected to Google.
 
 ## Demonstration script (about 2½ minutes)
 
@@ -55,8 +56,8 @@ production frontend).
 > exact duplicate and one blank. All 19 are accounted for.
 >
 > **[Screen: terminal, npm test]** The tests check the code against that hand
-> calculation, plus the dangerous cases. 171 tests, no network, about five
-> seconds.
+> calculation, plus the dangerous cases. 252 tests, no network, about
+> fifteen seconds.
 >
 > **[Screen: v16-02 Review]** Eggs went from 300 to 420. That's 40%, so it
 > isn't applied; it waits for a person. Wheat flour went up 7.9%, which is
@@ -78,7 +79,7 @@ production frontend).
 > just the steps to establish what actually happened.
 >
 > **[Screen: terminal, npm run verify:n8n]** The same scenarios run in the real
-> n8n engine with recorded responses: 14 out of 14 match.
+> n8n engine with recorded responses: 16 out of 16 match.
 >
 > **[Closing]** What's left is testing against a live Google spreadsheet. That
 > includes checking how Google handles two updates arriving at once, which

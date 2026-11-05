@@ -144,6 +144,7 @@ class FakeGoogle {
     const sheet = `${SHEETS}/${this.spreadsheetId}`;
     if (!url.startsWith(sheet)) throw new Error(`Unexpected URL ${url}`);
     const rest = url.slice(sheet.length);
+    if (rest.startsWith('?') && rest.includes('ranges=') && method === 'GET') return 'SHEETS_CELLS';
     if (rest.startsWith('?') && method === 'GET') return 'SHEETS_META';
     if (rest.startsWith(':batchUpdate') && method === 'POST') return 'BATCH_UPDATE';
     if (rest.startsWith('/values:batchGet') && method === 'GET') return 'VALUES_BATCH_GET';
@@ -197,6 +198,37 @@ class FakeGoogle {
             }, grid ? { data: [{ rowData: tab.rows.map((row) => ({ values: (row || []).map(cell) })) }] } : {})),
           }),
         };
+      }
+      case 'SHEETS_CELLS': {
+        // What each cell holds. A cell value may be { formula, value } (a formula
+        // and its result) or { spilled: true, value } (filled by an array formula).
+        const fields = parsed.searchParams.get('fields') || '';
+        if (!fields.includes('userEnteredValue')) return { status: 400, body: errorBody(400, 'INVALID_ARGUMENT', 'field mask') };
+        const range = parseRange(parsed.searchParams.get('ranges'));
+        const tab = this.tabs.get(range.tab);
+        if (!tab) return { status: 400, body: errorBody(400, 'INVALID_ARGUMENT', `Unable to parse range: ${range.tab}`) };
+        const typed = (value) => {
+          if (typeof value === 'number') return { numberValue: value };
+          if (typeof value === 'boolean') return { boolValue: value };
+          return { stringValue: String(value) };
+        };
+        const cellData = (value) => {
+          if (isEmpty(value)) return {};
+          if (typeof value === 'object') {
+            const shown = isEmpty(value.value) ? {} : { effectiveValue: typed(value.value) };
+            return Object.assign(value.spilled ? {} : { userEnteredValue: { formulaValue: value.formula } }, shown);
+          }
+          return { userEnteredValue: typed(value), effectiveValue: typed(value) };
+        };
+        const rowData = [];
+        for (let r = range.startRow - 1; r < Math.min(tab.rows.length, range.endRow); r += 1) {
+          const value = (tab.rows[r] || [])[range.startCol - 1];
+          rowData.push(isEmpty(value) ? {} : { values: [cellData(value)] });
+        }
+        while (rowData.length > 0 && !rowData[rowData.length - 1].values) rowData.pop();
+        // Like the JSON API, zero values are left out.
+        const grid = Object.assign(range.startRow > 1 ? { startRow: range.startRow - 1 } : {}, range.startCol > 1 ? { startColumn: range.startCol - 1 } : {});
+        return { status: 200, body: { sheets: [{ data: [Object.assign(grid, rowData.length > 0 ? { rowData } : {})] }] } };
       }
       case 'VALUES_GET': {
         const range = decodeURIComponent(parsed.pathname.split('/values/')[1]);
@@ -258,7 +290,9 @@ class FakeGoogle {
     for (let r = range.startRow - 1; r < lastRow; r += 1) {
       const row = (tab.rows[r] || []).slice(range.startCol - 1, range.endCol);
       while (row.length > 0 && isEmpty(row[row.length - 1])) row.pop();
-      rows.push(row.map((cell) => (isEmpty(cell) ? '' : cell)));
+      // Values come back as displayed in substance: a formula's result, not the formula.
+      const shown = (cell) => (cell && typeof cell === 'object' && 'value' in cell ? cell.value : cell);
+      rows.push(row.map(shown).map((cell) => (isEmpty(cell) ? '' : cell)));
     }
     while (rows.length > 0 && rows[rows.length - 1].length === 0) rows.pop();
     const out = { range: text, majorDimension: 'ROWS' };

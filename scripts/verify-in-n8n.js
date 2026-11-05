@@ -15,8 +15,9 @@
 // built-ins (and `isExecuted`) behave as the glue code expects.
 //
 // Usage: npm run verify:n8n
-// Runs n8n with its own user folder in var/n8n-verify (gitignored), a separate
-// task-runner port, and telemetry and version checks off. No network calls.
+// Runs n8n with its own user folder in var/n8n-verify (gitignored; set
+// SHEETOPS_VERIFY_DIR to use another folder), its own task-runner port, so it
+// can run beside the dedicated server from scripts/start-n8n.sh, and telemetry and version checks off. No network calls.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -28,7 +29,7 @@ const { FakeGoogle } = require('../test/support/fake-google.js');
 const { core, week2 } = require('../test/support/helpers.js');
 
 const ROOT = path.join(__dirname, '..');
-const USER_FOLDER = path.join(ROOT, 'var', 'n8n-verify');
+const USER_FOLDER = process.env.SHEETOPS_VERIFY_DIR ? path.resolve(process.env.SHEETOPS_VERIFY_DIR) : path.join(ROOT, 'var', 'n8n-verify');
 const WORKFLOW_DIR = path.join(USER_FOLDER, 'replay-workflows');
 const N8N = process.env.N8N_BIN || 'n8n';
 const NOW = '2026-10-19T07:00:00.000Z';
@@ -91,6 +92,17 @@ const SCENARIOS = [
       row[core.REVIEW_COLUMNS.indexOf('decision')] = 'APPROVE';
     }),
   },
+  {
+    // A formula that shows APPROVE is not an approval, and the publish must not
+    // store its result as typed text (§8).
+    name: 'review-formula-abort',
+    catalog: w.expected.catalog,
+    review: w.expected.review.map((item) => (item.sku === 'TEA-001' ? Object.assign({}, item, { decision: { formula: '=UPPER("approve")', value: 'APPROVE' } }) : item)),
+    runLog: [priorRow('SUCCESS_WITH_EXCEPTIONS')],
+    manual: { reprocess_latest: true },
+  },
+  // Latin-1 bytes for "é": rejected as a whole through the real Extract From File node.
+  { name: 'invalid-encoding-rejected', files: [Object.assign({}, WEEK2_FILE, { content: Buffer.concat([Buffer.from(w.csvText, 'utf8'), Buffer.from([0xe9])]) })] },
   { name: 'download-failed', fault: { kind: 'DRIVE_GET', type: 'timeout', times: 3 } },
   { name: 'bad-filename', files: [{ id: 'drv-xlsx', name: 'prices.xlsx', mimeType: 'application/vnd.ms-excel', modifiedTime: NOW, createdTime: NOW, content: 'PK' }] },
   { name: 'blocked-halted', runLog: [priorRow('HALTED_REVIEW')] },
@@ -163,7 +175,7 @@ function replayWorkflow(base, sim, id, name) {
       `const recorded = ${JSON.stringify(recorded)};`,
       `if (recorded === null) throw new Error('Replay: "${node.name}" was not expected to run');`,
       `const request = { method: ${JSON.stringify(p.method)}, url: ${expressionToJs(p.url)}, body: ${body} };`,
-      `return recorded.map((item) => ({ json: Object.assign({}, item.json, { ${REPLAY_FIELD}: request }) }));`,
+      `return recorded.map((item) => Object.assign({ json: Object.assign({}, item.json, { ${REPLAY_FIELD}: request }) }, item.binary ? { binary: item.binary } : {}));`,
     ].join('\n');
     return {
       id: node.id, name: node.name, type: 'n8n-nodes-base.code', typeVersion: 2, position: node.position,
@@ -207,7 +219,7 @@ function builtInsWorkflow() {
 function n8n(args) {
   const env = Object.assign({}, process.env, {
     N8N_USER_FOLDER: USER_FOLDER,
-    N8N_RUNNERS_BROKER_PORT: '5699',
+    N8N_RUNNERS_BROKER_PORT: '5697',
     N8N_PORT: '5698',
     N8N_DIAGNOSTICS_ENABLED: 'false',
     N8N_VERSION_NOTIFICATIONS_ENABLED: 'false',

@@ -34,6 +34,7 @@ test('request URLs are built and encoded exactly', () => {
       + "&ranges='Run%20Log'!A1%3AZ"
       + `&${READ}`,
     read_review: `${SHEET}/values/'Review'!A1%3AP?${READ}`,
+    read_review_decisions: `${SHEET}?ranges='Review'!O1%3AO&fields=sheets(data(startRow%2CstartColumn%2CrowData(values(userEnteredValue%2CeffectiveValue))))`,
     batch_update: `${SHEET}:batchUpdate`,
   });
   assert.equal(core.googleDownloadUrl('drv-week2'), 'https://www.googleapis.com/drive/v3/files/drv-week2?alt=media&supportsAllDrives=true');

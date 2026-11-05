@@ -31,7 +31,8 @@ the run. Completing this checklist is preparation, not authorization.
 - [ ] LeadIntel's n8n stopped. Only one n8n runs at a time; SheetOps uses port 5680 and `var/n8n`.
 - [ ] `scripts/start-n8n.sh` started; local owner account created.
 - [ ] Credential **Google Service Account API**, named exactly `SheetOps Google service account`, with the two scopes from setup §4.
-- [ ] `workflow/sheetops.workflow.json` imported. All eleven Google nodes show the credential.
+- [ ] **The current** `workflow/sheetops.workflow.json` imported (33 nodes), replacing any earlier import: an earlier import is out of date, and the runner refuses two workflows with the same name. All twelve Google nodes show the credential.
+- [ ] Encode CSV and Read Review decisions are present; Download CSV returns a file.
 - [ ] Settings: `PASTE_SPREADSHEET_ID` and `PASTE_FOLDER_ID` replaced.
 - [ ] Workflow **not activated**.
 
@@ -53,10 +54,11 @@ the run. Completing this checklist is preparation, not authorization.
 
 These points were found by reading the runner. They are not covered by the setup guide.
 
-- **Read `report.json`, not only the last line.** `INCONCLUSIVE` is not counted as a failure, so a run where T-VERSION-2, T-LOST-A or T-LOST-B is inconclusive still ends with "No failures." and exit code 0. For the version tests the runner also prints "VERSION CHECK NOT CONFIRMED". An inconclusive result is never a pass, and automatic recovery stays off.
+- **Exit codes** (changed 4 November 2026). 0 means every test the selected phases require passed; a single phase prints `PARTIAL VERIFICATION PASSED` and records `verification: PARTIAL`, not the full suite. 1 means at least one result is failed, inconclusive, errored, unresolved, skipped when required, missing or malformed. 2 means the runner could not start or report. The terminal summary and the `summary` block in `report.json` come from one assessment and list each class separately.
+- **An inconclusive result is neither a pass nor a failure.** It exits 1 and keeps its classification. Read its details in `report.json` and its evidence folder. For the version tests the runner also prints "VERSION CHECK NOT CONFIRMED", and automatic recovery stays off.
+- **`--reps=N`** must be a positive whole number, and at least 8 on a live `harness` or `all` run: fewer is refused before any live step. A live T-VERSION-2 with fewer than 8 passing trials can never count as a pass.
 - **Phases.** `all` runs `check` (T-UI, T-LIVE-1), then `harness` (T-ATOM-1/2, T-SEC-1, T-VERSION-1/2), then `recovery` (T-LOST-A, T-LOST-B). An error in one phase skips the later ones. The individual phases and `--reps=N` (T-VERSION-2 trials, default 8) exist but are documented only in the runner's header comment.
 - **Evidence** is saved under `var/live/live-<time>/`, and the ledger under `var/live/ledger-<spreadsheet ID>.json`. Both are gitignored; keep them.
-- A `PASS*` verdict is checked for in the runner's final summary but never assigned. This is harmless.
 
 ## 7. Documented test list versus the runner
 
@@ -64,4 +66,6 @@ Every test in setup §5 is implemented in `scripts/live/run-live-tests.js`:
 T-UI, T-LIVE-1, T-ATOM-1, T-ATOM-2, T-SEC-1, T-VERSION-1, T-VERSION-2
 (8 trials by default), T-LOST-A and T-LOST-B (including the 16-minute wait).
 The runner adds nothing beyond the guide except the phase names and `--reps`.
+T-ENCODING and T-FORMULA are the exception: they are manual checks in setup §5, and
+the runner's result does not include them.
 Live behaviour, timing and Google's answers remain unverified until the run.

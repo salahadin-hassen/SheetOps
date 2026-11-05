@@ -1,6 +1,6 @@
 # SheetOps data contract
 
-Version 2.5. Changes since the approved v2.1, all made while building the n8n
+Version 2.6. Changes since the approved v2.1, all made while building the n8n
 workflow (M2):
 
 - v2.2: the Review guard is a read order instead of a second read before
@@ -30,6 +30,17 @@ workflow (M2):
   the read fails, nothing is published and the run ends `FAILED`
   (`REVIEW_CHANGED` or `REVIEW_READ_FAILED`). The check shortens the window in
   which an edit can be lost; it does not close it.
+- v2.6 (owner decisions, November 2026):
+  - **Changes order** (section 10): this document now states the order the code
+    and its tests have always used, `REVIEW_SUPERSEDED` first.
+  - **Bounded Exceptions text** (section 10): `Exceptions.raw_value`, `sku_raw`
+    and `message` are truncated, with an explicit marker, above 40,000 UTF-16
+    units. Business values are validated or rejected, never shortened.
+  - **Strict UTF-8** (sections 1 and 12, `INVALID_ENCODING`): the file reaches the
+    core as bytes, and invalid UTF-8 rejects it whole.
+  - **Typed decisions only** (sections 7, 8 and 12,
+    `REVIEW_DECISION_NOT_LITERAL`): a formula never counts as an approval, and
+    its presence in a decision cell stops the publish.
 
 Scope of version one: one supplier, one currency (ETB), one Google Drive inbox
 folder, one spreadsheet.
@@ -48,7 +59,7 @@ document is the specification and the code is the bug.
 | File name | `<supplier>_<YYYY-MM-DD>.csv`, matched by `^([a-z0-9]+(?:-[a-z0-9]+)*)_(\d{4})-(\d{2})-(\d{2})\.csv$` |
 | Supplier part | Must equal the configured supplier slug (`demo-supplier` in the fixtures). |
 | Date part | The price list's **effective date** (not the upload date). Must be a real calendar date. |
-| Encoding | UTF-8. A leading byte-order mark is removed. |
+| Encoding | UTF-8, strictly. A leading byte-order mark is removed. Any invalid byte sequence (including overlong forms, encoded surrogates, values above U+10FFFF and a truncated final sequence) rejects the **whole file** as `REJECTED_FILE` (`INVALID_ENCODING`, naming the first invalid byte's offset). No row is processed, no encoding is guessed and no replacement character is substituted. A correctly encoded U+FFFD in the file is valid text and is kept. |
 | Format | Comma-separated, RFC 4180 quoting (section 3). |
 | Limits | At most 2,000,000 bytes and 2,000 data records. |
 
@@ -287,6 +298,9 @@ active SKUs absent from the file (subject to the safety stop, section 11).
 - **Decision values.** Trimmed and compared case-insensitively. `APPROVE`
   approves. Blank is pending. Anything else is kept exactly as typed and shown
   with status `INVALID_DECISION`; it never applies a change.
+- **Typed decisions only.** A decision must be a value a person typed into that
+  cell. A formula, or a value an array formula placed there, never counts,
+  whatever it shows, and stops the publish (section 8).
 - **No REJECT in version one.** If the operator disagrees with the supplier,
   the fix is a corrected list, which supersedes the item.
 - **Tampering guard.** If an item opened by the batch being processed shows a
@@ -318,6 +332,25 @@ safe.
     twice is a change. A header or managed-column problem in the final read
     is a change.
   - Managed columns are not compared: the publish rewrites them anyway.
+  - **Every decision cell must hold a typed value.** The same step reads the
+    decision column with `spreadsheets.get`, asking for each cell's
+    `userEnteredValue` and `effectiveValue` (`sheets.data.rowData.values`).
+    `userEnteredValue` is what the cell holds, so this does not rely on what the
+    cell displays:
+    - `formulaValue` is a formula, whatever it evaluates to, including nothing;
+    - no `userEnteredValue` with a value displayed is a cell filled by an array
+      formula elsewhere;
+    - any other kind of value, or a typed value that differs from step 6a's read
+      of that row, is ambiguous.
+
+    Any of these ends the run `FAILED` (`REVIEW_DECISION_NOT_LITERAL`, naming
+    the rows) with nothing published. The run must stop rather than ignore the
+    cell: a publish rewrites Review from the values read, so it would store the
+    formula's result as typed text, and the next run would read it as an
+    approval. The cell is left as it is. A typed `=...` is text, so it is simply
+    `INVALID_DECISION`. A failed or malformed read is `REVIEW_READ_FAILED`. Only
+    `decision` is checked: a formula in `note` still has its displayed value
+    stored as text.
   - If anything differs, nothing is published and the run ends `FAILED`
     (`REVIEW_CHANGED`, naming the items and fields). If the final read fails
     after its three tries, or returns no usable rows, the run ends `FAILED`
@@ -339,6 +372,8 @@ safe.
   planning time is no longer inside it); it does not close it, and it cannot:
   Google Sheets has no conditional write, and Google documents that a
   `batchUpdate` "may be altered with respect to collaborator changes".
+  A formula saved in that window is overwritten by the value read earlier, so
+  it cannot become an approval.
   Evidence: `simulate.test.js` injects an approval after the final read and
   checks that it is lost and not applied, and injects one before the final
   read and checks that the run aborts without publishing.
@@ -413,7 +448,12 @@ old_value, new_value, change_pct, review_id, note`
 - `change_type`: NEW_ITEM, REACTIVATED, PRICE_CHANGED, UNIT_CHANGED,
   NAME_CHANGED, DISCONTINUED, REVIEW_SUPERSEDED.
 - `disposition`: APPLIED, HELD_FOR_REVIEW, APPLIED_AFTER_REVIEW, NOT_APPLIED.
-- Rows are sorted by sku, then change type in the order above.
+- Rows are sorted by sku, then change type in this order: REVIEW_SUPERSEDED, NEW_ITEM, REACTIVATED, PRICE_CHANGED,
+  UNIT_CHANGED, NAME_CHANGED, DISCONTINUED, then by `event_id`. The list above
+  is not this order. `REVIEW_SUPERSEDED` comes first because it reads in the
+  order things happen: the old proposal is closed before the row that replaces
+  it, or the SKU's discontinuation, is recorded. The file's row order never
+  affects the result.
 
 **Exceptions** (append-only):
 `exception_id, batch_id, source_file, source_row, sku_raw, severity, code,
@@ -421,7 +461,37 @@ field, raw_value, message, action`
 
 - `severity`: ERROR (rejected), REVIEW (held or halted), INFO (collapsed).
 - `action`: KEPT_PREVIOUS, NOT_ADDED, IGNORED, FILE_NOT_PROCESSED.
-- `sku_raw` and `raw_value` are the cells exactly as they appeared in the file.
+- `sku_raw` and `raw_value` are the cells exactly as they appeared in the file,
+  with one documented exception.
+- **Bounded Exceptions text.** Google documents a limit of 50,000 characters per
+  cell, and one oversized cell would make it refuse the whole publish. A
+  `raw_value`, `sku_raw` or `message` longer than 40,000 UTF-16 units is
+  therefore stored as its first characters plus
+  ` [TRUNCATED] original length <n> characters`, where `<n>` counts characters
+  (code points). The whole result, marker included, is at most 40,000 units, and
+  a surrogate pair is never split. A value of 40,000 units or fewer that happens
+  to contain the marker text is stored verbatim.
+  - **Messages.** A message that quotes a supplier value (`INVALID_SKU`,
+    `UNKNOWN_UNIT`, `AMBIGUOUS_PRICE`, `INVALID_PRICE`, `CURRENCY_MISMATCH`)
+    quotes at most 39,000 units of it, with the same marker inside the quotes, so
+    the explanation after the value survives. Other messages hold only row
+    numbers, counts, codes and the file name, and take the 40,000-unit bound.
+  - **Traceability.** `source_file` and `source_row` lead to the complete value in
+    the supplier's file, which SheetOps never modifies. `source_file` is not
+    shortened.
+  - **Display only.** Bounding happens when the row is written. SKU identity,
+    grouping, review IDs, exception IDs, deduplication and every decision use the
+    complete value, and IDs hold no free text from the file.
+  - **Business values are never shortened.** A value that can reach Catalog,
+    Review or Changes is validated first: an SKU must match its pattern, a name is
+    at most 200 characters, a unit is from the fixed list and a price is parsed to
+    cents. Anything else rejects the row.
+  - **Other columns.** `Catalog.last_issue` holds only codes and row numbers. It
+    is not shortened: at the row limit its worst case is about 44,000 characters,
+    above this bound but under Google's limit. `source_file` and
+    `Run Log.source_name` hold the Drive file name whole.
+  - **Run Log.** `error_message` keeps its own limit of 500 units, ending `...`,
+    because its Exceptions rows hold the detail. It never splits a surrogate pair.
 
 **Run Log** (one row per run):
 `run_id, mode, status, started_at, finished_at, batch_id, source_file_id,
@@ -463,10 +533,10 @@ with the Google Service Account credential; URLs come from
 | 1 | Drive `files.list` of the inbox (up to 51 entries, one page) | 3 tries, 5 s apart | Run stops; nothing written |
 | 2 | Sheets `values.get` of Run Log | 3 tries | Run stops; nothing written |
 | 3 | Sheets `values.append` of the `STARTED` row (`RAW`, `INSERT_ROWS`) | **none** (an append is not idempotent) | Run stops; a row may exist and is later marked `INTERRUPTED` |
-| 4 | Drive `files.get?alt=media` (processing runs only) | 3 tries | Definitive failure `DOWNLOAD_FAILED` |
+| 4 | Drive `files.get?alt=media` (processing runs only), kept as a binary file and passed to the core as base64, never decoded as text on the way | 3 tries | Definitive failure `DOWNLOAD_FAILED` |
 | 5 | Sheets `spreadsheets.get`: tab IDs, grid sizes and the version (the sheet ID of `_sheetops_version`) | 3 tries | Definitive failure `READ_FAILED` |
 | 6 | Sheets `values.batchGet`: Catalog, Review, the Changes and Exceptions header rows and ID columns, and Run Log | 3 tries | Definitive failure `READ_FAILED` |
-| 6a | Sheets `values.get` of Review, the final check (section 8); only when the plan writes Review | 3 tries | Definitive failure `REVIEW_READ_FAILED`; a changed decision or note is `REVIEW_CHANGED` |
+| 6a | Sheets `values.get` of Review, then `spreadsheets.get` of the decision column's `userEnteredValue`: the final check (section 8); only when the plan writes Review | 3 tries each | Definitive failure `REVIEW_READ_FAILED`; a changed decision or note is `REVIEW_CHANGED`; a decision that is not typed is `REVIEW_DECISION_NOT_LITERAL` |
 | 7 | Sheets `spreadsheets.batchUpdate`: the publish | **none** | See "After a publish error" |
 
 After a failure, up to two more calls follow:
@@ -641,7 +711,10 @@ version, so at most one of them applies:
   only a live test can show it.
 - **Unconditional:** holds whatever Google does.
 
-None of this has been observed live yet.
+None of this has been observed live yet. The same is true of the typed-decision
+check and the strict-encoding path: the offline fake models Google's documented
+response, and the live tests T-FORMULA and T-ENCODING (docs/setup.md §5) must
+confirm the real ones. Both fail closed if the real response differs.
 
 1. *At most one publish per version applies.*
    - Sequentially, a publish that lands after another one applied changes
@@ -695,11 +768,12 @@ evidence (by default), or until a run 15 minutes or more later recovers it
 | An unresolved publication whose file version left the inbox, or several unresolved | one append: the run row | unchanged | BLOCKED (`PUBLICATION_UNRESOLVED`) |
 | A publish planned from a version that has moved on (lost race) | nothing from the request; run row `FAILED` | unchanged by this run | FAILED (`PUBLISH_REJECTED`) |
 | Pre-download check fails, or out of order | one request: Exceptions row + run row | unchanged | REJECTED_FILE |
-| Unreadable CSV, empty, too large, too many rows, missing or ambiguous column | one request: Exceptions row(s) + run row | unchanged | REJECTED_FILE |
+| Invalid UTF-8, unreadable CSV, empty, too large, too many rows, missing or ambiguous column | one request: Exceptions row(s) + run row | unchanged | REJECTED_FILE |
 | More than 30% of active SKUs absent | one request: Exceptions row + run row | unchanged | HALTED_REVIEW |
 | Download or tab read fails after `STARTED` | run row `FAILED`, once step 8 confirms the row | unchanged | FAILED |
 | Catalog, Review or Run Log tab invalid | run row `FAILED`, once step 8 confirms the row | unchanged | FAILED |
 | A Review decision or note changed after the tab read, or the final Review read failed (step 6a) | run row `FAILED`, once step 8 confirms the row; no publish is sent | unchanged | FAILED (`REVIEW_CHANGED`, `REVIEW_READ_FAILED`) |
+| A decision cell holds a formula or a value nobody typed there (step 6a) | run row `FAILED`, once step 8 confirms the row; no publish is sent; the cell is left as it is | unchanged | FAILED (`REVIEW_DECISION_NOT_LITERAL`) |
 | Publish rejected (4xx except 408) | nothing from the request; run row `FAILED`, once step 8 confirms the row | unchanged | FAILED |
 | Publish outcome unknown | all of the request or none of it; **no failure status** | all or nothing | the final status if applied; otherwise `STARTED`, later `INTERRUPTED` (n8n: `PUBLISH_OUTCOME_UNKNOWN`) |
 | This run's row moved or cannot be confirmed (Run Log edited during the run, or step 8 failed) | none after the failure | unchanged | `STARTED`, later `INTERRUPTED` (n8n: `RUN_ROW_UNVERIFIED`) |
@@ -715,7 +789,7 @@ after 14 days by default (`EXECUTIONS_DATA_MAX_AGE`).
 ## 14. Code reference
 
 - File level: `NOT_A_CSV_FILE`, `BAD_FILENAME`, `WRONG_SUPPLIER`,
-  `OUT_OF_ORDER_FILE`, `CSV_PARSE_ERROR`, `FILE_EMPTY`, `FILE_TOO_LARGE`,
+  `OUT_OF_ORDER_FILE`, `INVALID_ENCODING`, `CSV_PARSE_ERROR`, `FILE_EMPTY`, `FILE_TOO_LARGE`,
   `TOO_MANY_ROWS`, `MISSING_COLUMN`, `AMBIGUOUS_COLUMN`, `MASS_DISCONTINUE`.
 - Row level: `FIELD_COUNT_MISMATCH`, `MISSING_SKU`, `INVALID_SKU`,
   `MISSING_NAME`, `NAME_TOO_LONG`, `MISSING_UNIT`, `UNKNOWN_UNIT`,
@@ -726,7 +800,8 @@ after 14 days by default (`EXECUTIONS_DATA_MAX_AGE`).
   `SETTINGS_INVALID`, `INVALID_LISTING`, `READ_FAILED`, `DOWNLOAD_FAILED`,
   `CATALOG_INVALID`, `REVIEW_INVALID`, `RUNLOG_INVALID`,
   `OUTPUT_SCHEMA_MISMATCH`, `PUBLISH_TOO_LARGE`, `PLAN_INVALID`,
-  `PUBLISH_REJECTED`, `REVIEW_CHANGED`, `REVIEW_READ_FAILED`.
+  `PUBLISH_REJECTED`, `REVIEW_CHANGED`, `REVIEW_READ_FAILED`,
+  `REVIEW_DECISION_NOT_LITERAL`.
 - Not written to the spreadsheet (shown in n8n only): `RUN_IN_PROGRESS`
   (WAIT), `PUBLISH_OUTCOME_UNKNOWN`, `RUN_ROW_UNVERIFIED`, and the manual-run
   refusals `NOTHING_COMMITTED`,

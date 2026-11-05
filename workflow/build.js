@@ -164,7 +164,9 @@ function buildWorkflow() {
   switchNode('Download needed?', [1980, 200], 2, "={{ $('Select batch').first().json.selection.action === 'PROCESS' ? 0 : 1 }}");
   httpNode('Download CSV', [2200, 80], {
     method: 'GET', url: "={{ $('Select batch').first().json.download_url }}", timeout: DOWNLOAD_TIMEOUT_MS,
-    retry: true, continueOnFail: true, responseFormat: 'text', outputPropertyName: 'csv',
+    // A file, not text: decoding here would replace invalid bytes before the
+    // core could see them (contract §1).
+    retry: true, continueOnFail: true, responseFormat: 'file', outputPropertyName: 'csv_file',
   });
   httpNode('Read sheet metadata', [2420, 200], { method: 'GET', url: fromPrepare('sheet_meta'), timeout: READ_TIMEOUT_MS, retry: true, continueOnFail: true });
   httpNode('Read working tabs', [2640, 200], { method: 'GET', url: fromPrepare('read_working_tabs'), timeout: READ_TIMEOUT_MS, retry: true, continueOnFail: true });
@@ -196,6 +198,18 @@ function buildWorkflow() {
   httpNode('Re-read Review', [3300, -60], { method: 'GET', url: fromPrepare('read_review'), timeout: READ_TIMEOUT_MS, retry: true, continueOnFail: true });
   codeNode('Check Review', [3520, -60], 'check-review', true);
   switchNode('Review unchanged?', [3740, -60], 2, '={{ $json.route }}');
+  // Added after the nodes above so their IDs stay stable. Encode CSV hands the
+  // file's exact bytes to the core as base64 (§1). Read Review decisions shows
+  // what each decision cell holds, not what it displays (§8).
+  add({
+    name: 'Encode CSV',
+    type: 'n8n-nodes-base.extractFromFile',
+    typeVersion: 1.1,
+    position: [2310, 80],
+    onError: 'continueRegularOutput',
+    parameters: { operation: 'binaryToPropery', binaryPropertyName: 'csv_file', destinationKey: 'csv_base64', options: {} },
+  });
+  httpNode('Read Review decisions', [3410, -160], { method: 'GET', url: fromPrepare('read_review_decisions'), timeout: READ_TIMEOUT_MS, retry: true, continueOnFail: true });
 
   connect('Every 2 hours', ['Scheduled run']);
   connect('Run manually', ['Manual run options']);
@@ -210,12 +224,14 @@ function buildWorkflow() {
   connect('Append STARTED row', ['Download needed?']);
   connect('Append BLOCKED row', ['Done']);
   connect('Download needed?', ['Download CSV', 'Read sheet metadata']);
-  connect('Download CSV', ['Read sheet metadata']);
+  connect('Download CSV', ['Encode CSV']);
+  connect('Encode CSV', ['Read sheet metadata']);
   connect('Read sheet metadata', ['Read working tabs']);
   connect('Read working tabs', ['Plan and build']);
   connect('Plan and build', ['Publish or record failure']);
   connect('Publish or record failure', ['Re-read Review', 'Read run row', 'Publish']);
-  connect('Re-read Review', ['Check Review']);
+  connect('Re-read Review', ['Read Review decisions']);
+  connect('Read Review decisions', ['Check Review']);
   connect('Check Review', ['Review unchanged?']);
   connect('Review unchanged?', ['Publish', 'Read run row']);
   connect('Publish', ['Check publish']);

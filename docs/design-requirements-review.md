@@ -7,21 +7,28 @@ contract, the requirements, and the current M2 working tree.
 The design is a concept. Nothing here is evidence that Google Sheets
 integration works.
 
+**Update, 4 November 2026.** The mapping below is the 29 October review. Since then,
+a read-only console has been built in `frontend/` on offline demo data: Overview,
+Runs, Run details, Review, Exceptions, Incoming files (recorded files only), Catalog,
+Change history and Connection. The live Drive inbox, approval controls and live data
+are not built. Where a row below says the console
+does not exist, read it with this update. There is still no live evidence.
+
 ## Evidence levels
 
 | Code | Meaning | Status today |
 |---|---|---|
 | **D** | Design: a screen shows the behaviour | Canvas v16; screenshots rendered from v16 files |
-| **U** | Offline unit, fixture and property tests of the core | 171/171 pass (`npm test`, 29 Oct, after contract v2.5) |
-| **S** | Whole workflow in the simulator against a fake Google | 31 scenarios, inside the 171 |
-| **R** | Real n8n 2.41.7 engine, recorded Google responses | 14/14 (`npm run verify:n8n`, 29 Oct, after contract v2.5) |
+| **U** | Offline unit, fixture and property tests of the core | 171/171 at `eeac3a1`; 252/252 with contract v2.6 (`npm test`, 5 Nov) |
+| **S** | Whole workflow in the simulator against a fake Google | 31 scenarios, inside the root suite |
+| **R** | Real n8n 2.41.7 engine, recorded Google responses | 16/16 (`npm run verify:n8n`, 5 Nov), plus import round-trip and built-in checks |
 | **L** | Live Google Sheets and Drive | **None.** No live run exists |
 
 ## Mapping
 
 | Design area | What the screen communicates | Required behaviour | Evidence | Gaps |
 |---|---|---|---|---|
-| **Overview** (`v16-01`) | Publishing paused by an unknown outcome; last committed run; row accounting; items needing attention | One authoritative final status per run; `rows_read` = sum of outcomes; a STARTED row ≥ 15 min is unresolved and blocks publishing | U: week-2 run row exact, accounting invariant checked on every run, `queue`: "an old one is an unresolved publication". S, R: final outcome of all 14 scenarios | L. The console is not built: in v1 this information exists only as Run Log rows and the n8n execution record |
+| **Overview** (`v16-01`) | Publishing paused by an unknown outcome; last committed run; row accounting; items needing attention | One authoritative final status per run; `rows_read` = sum of outcomes; a STARTED row ≥ 15 min is unresolved and blocks publishing | U: week-2 run row exact, accounting invariant checked on every run, `queue`: "an old one is an unresolved publication". S, R: final outcome of all 14 scenarios | L. In v1 this information exists only as Run Log rows and the n8n execution record; the console's Overview (built later) shows demo data only |
 | **Incoming Files** | Queue order; pre-download rejections; a stale file rejected; queue paused behind an unresolved run | Order key (effective date, modified, created, file ID); `OUT_OF_ORDER_FILE`; pre-download codes reported once; `PUBLICATION_UNRESOLVED`; `QUEUE_TOO_LARGE` | U: 18 `queue` tests. S: native/oversize files, malformed name, paged listing, older file during an unresolved run. R: `bad-filename`, `blocked-halted`, `blocked-unresolved-old-started`, `idle-committed` | L: real Drive listing, paging and `modifiedTime` precision untested. The screen lists files the sheet never records (waiting files); showing them would need a Drive read that v1 does not have |
 | **Review, editable** (`v16-02`) | Why a change is held; current vs proposed; APPROVE only; consequences of approving | Hold at ≥ 25.00% in cents, unit and name changes; APPROVE applies only when a later list still proposes the value; supersede on change or absence; decisions and notes preserved by `review_id` | U: `review` 25.00% held / 24.99% applied, approval applies with note, superseding, invalid decision kept, hand-sorting harmless, notes preserved. S: APPROVE survives reprocessing, then applies | L. The final Review check (v2.5) aborts on a change before the publish, but an edit after that check can still be lost (see below). In v1 the operator types APPROVE in the sheet; the console's Approve button is design only |
 | **Review, read-only** | Decisions locked while a run shows STARTED, with the reason | Contract §8: "Do not edit the Review tab while a run is active" | D only | **Gap: nothing enforces the lock.** SheetOps applies no sheet protection, so an operator can still edit Review during a run. The screen shows a safeguard the product does not have; today it is an operating rule |
@@ -31,7 +38,7 @@ integration works.
 | **Exceptions** | Every row not applied, with raw value and action | Codes and severities per contract §5–6; raw values verbatim | U: `fields`, `csv`, week-2 `exceptions_new` exact (9 rows) | L |
 | **Run Details**, unknown outcome (`v16-05`, `v16-06`) | Stage track limited to what the sheet proves; no retry; investigation steps | 4xx except 408 definitive → FAILED only over this run's own verified STARTED row; 5xx/408/timeout/lost → nothing written; later reprocess marks INTERRUPTED | U: `publish` classification, FAILED only over own row, nothing after unknown. S: 403, 503, lost response, late landing, unreadable marker, sorted Run Log. R: the same 8 failure scenarios | **L: T-LOST-A, T-LOST-B, T-VERSION-1/2.** Steps 2–4 detail exists only in n8n; the screen correctly shows "not in the sheet" |
 | **Run statuses** | Halted, blocked, rejected, superseded, failed cards | `>` 30% absent halts (3/10 proceeds, 4/10 halts); RETRY_LIMIT after 3 attempts; BATCH_HALTED | U: `safety` 3/10 and 4/10, override; `queue` retry limit. S: 50% halt. R: `blocked-halted`, `download-failed` | L |
-| **State inventory** | Loading and empty states; state matrix | None in v1: there is no console to load | D only | Design reference for a future frontend; no behaviour to verify |
+| **State inventory** | Loading and empty states; state matrix | None in v1 | D only for this review | The later console was not assessed here; it has offline tests on demo data only |
 | **Prototype journey** | File → validation → review → approval → publication → audit | As above | D, plus run-1002 values computed by the core offline | The journey is simulated; no Google or n8n operation runs |
 
 ## Findings
@@ -53,10 +60,10 @@ integration works.
    nothing. The version check also relies on the inference that deleting a
    missing sheet ID is an invalid request. What happens when two publishes
    arrive concurrently is not documented; only T-VERSION-2 can show it.
-4. **No live evidence of any kind.** SheetOps' own n8n instance has never
-   been started on this machine (`var/n8n` is absent), so no credential and no
-   imported workflow exist. The Google project, service account, spreadsheet
-   and inbox could not be confirmed.
+4. **No live evidence of any kind.** As read on 4 November 2026, SheetOps' own
+   n8n database (`var/n8n`) holds the imported workflow (inactive), no credential
+   and no executions. The Google project, service account, spreadsheet and inbox
+   have not been independently verified.
 
 ## Google documentation relied on
 
