@@ -7,6 +7,16 @@ export interface Column<T> {
   /** The column that names the row; rendered as a row header. */
   rowHeader?: boolean;
   align?: 'right';
+  /**
+   * How the cell sits in the stacked phone layout (tables with `stack`):
+   * head: first line, left. end: first line, right. full: its own line, no label.
+   * meta: small inline text, no label. metaLabel: the same, with its label.
+   * hide: not shown on a phone (must be reachable elsewhere, such as a drawer).
+   * Unset: a labelled line.
+   */
+  phone?: 'head' | 'end' | 'full' | 'meta' | 'metaLabel' | 'hide';
+  /** Hide on medium widths, where the table would otherwise scroll sideways. */
+  hideMedium?: boolean;
 }
 
 interface Props<T> {
@@ -45,13 +55,14 @@ export function LedgerTable<T>({ caption, showCaption = false, columns, rows, ro
     return next;
   });
   const span = columns.length + (expand ? 1 : 0);
+  const classes = (c: Column<T>) => [c.align, c.phone ? `ph-${c.phone}` : undefined, c.hideMedium ? 'hide-medium' : undefined].filter(Boolean).join(' ') || undefined;
   return (
     <div className={`table-scroll${stack ? ' stackable' : ''}`} tabIndex={0} role="region" aria-label={`${caption} (table, scrolls sideways)`}>
       <table className={`ledger${stack ? ' stack' : ''}`} role={stack ? 'table' : undefined}>
         <caption className={showCaption ? undefined : 'visually-hidden'}>{caption}</caption>
         <thead role={stack ? 'rowgroup' : undefined}>
           <tr role={stack ? 'row' : undefined}>
-            {columns.map((c) => <th key={c.header} scope="col" className={c.align} role={stack ? 'columnheader' : undefined}>{c.header}</th>)}
+            {columns.map((c) => <th key={c.header} scope="col" className={classes(c)} role={stack ? 'columnheader' : undefined}>{c.header}</th>)}
             {expand ? <th scope="col" className="right" role={stack ? 'columnheader' : undefined}><span className="visually-hidden">Details</span></th> : null}
           </tr>
         </thead>
@@ -66,8 +77,8 @@ export function LedgerTable<T>({ caption, showCaption = false, columns, rows, ro
               <Fragment key={key}>
                 <tr className={['data-row', rowClass?.(row), extra ? 'has-detail' : ''].filter(Boolean).join(' ')} role={stack ? 'row' : undefined}>
                   {columns.map((c) => c.rowHeader
-                    ? <th key={c.header} scope="row" className={c.align} role={stack ? 'rowheader' : undefined}>{c.cell(row)}</th>
-                    : <td key={c.header} className={c.align} data-label={c.header} role={stack ? 'cell' : undefined}>
+                    ? <th key={c.header} scope="row" className={classes(c)} role={stack ? 'rowheader' : undefined}>{c.cell(row)}</th>
+                    : <td key={c.header} className={classes(c)} data-label={c.header} role={stack ? 'cell' : undefined}>
                       {/* One wrapper, so a multi-part cell stays in the value column of the stacked layout. */}
                       {stack ? <div className="cell-content">{c.cell(row)}</div> : c.cell(row)}
                     </td>)}

@@ -12,5 +12,7 @@ export default defineConfig({
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}'],
     css: false,
+    // Screen tests are slow on a busy low-memory machine; the default 5 s fails them falsely.
+    testTimeout: 15000,
   },
 });

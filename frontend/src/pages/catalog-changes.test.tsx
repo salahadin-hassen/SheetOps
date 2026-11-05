@@ -45,7 +45,7 @@ describe('Catalog', () => {
   it('filter tabs count the committed catalog after run 1001', async () => {
     await open('#/catalog?view=week2-published');
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
-      'All · 12', 'Active · 11', 'Discontinued · 1', 'Awaiting review · 3', 'Issues in the latest list · 2',
+      'All · 12', 'Active · 11', 'Discontinued · 1', 'Awaiting review · 3', 'Issues · 2',
     ]);
     fireEvent.click(tab(/^Discontinued/));
     expect(bodyRows().map((r) => within(r).getByRole('rowheader').textContent)).toEqual(['RCE-005']);

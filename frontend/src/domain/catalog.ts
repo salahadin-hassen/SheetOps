@@ -29,7 +29,8 @@ function proposalNote(review: ReviewRow | undefined, reviewId: string): CatalogN
   const parts: string[] = [];
   if (reasons.includes('NAME_CHANGED')) parts.push(`name “${review.proposed_name}”`);
   if (reasons.includes('UNIT_CHANGED')) parts.push(`unit “${review.proposed_unit}”`);
-  if (reasons.includes('LARGE_PRICE_CHANGE')) parts.push(formatPrice(review.proposed_price));
+  // A unit change holds a new price too, with no price reason of its own.
+  if (reasons.includes('LARGE_PRICE_CHANGE') || String(review.proposed_price) !== String(review.current_price)) parts.push(formatPrice(review.proposed_price));
   const what = parts.length ? `Proposed ${parts.join(', ')}` : 'Proposed change';
   const state = decisionState(review.decision) === 'APPROVED'
     ? 'approved in the sheet, not applied yet'

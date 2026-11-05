@@ -3,6 +3,14 @@
 A read-only web console for SheetOps. This milestone runs entirely offline on
 synthetic demo data. It is not connected to Google and is not production-ready.
 
+Screens: Overview, Runs, Run details, Review, Exceptions, Incoming files (recorded
+files only), Catalog, Change history and Connection. Live Google data, the live
+Drive inbox and any write action are not implemented.
+
+Verified on 5 November 2026: 169/169 tests, typecheck and production build pass, and a browser check of 350 page
+loads at 320, 375, 768, 1280 and 1440 px found no page overflow or console errors.
+These cover the console on demo data, and prove nothing about live Google.
+
 ## Scope expansion
 
 Version one of SheetOps excludes "any frontend" (`docs/requirements.md`,
@@ -59,7 +67,7 @@ time of the read. It never sees n8n, and says so where that matters.
   server; TypeScript types the five tab schemas. Runtime dependencies are React,
   React DOM and two self-hosted font packages (Public Sans, IBM Plex Mono). There
   is no router library (a 50-line hash router), no CSS framework and no state
-  library. The production bundle is about 320 KB of JavaScript (88 KB gzipped).
+  library. The production bundle is about 350 KB of JavaScript (96 KB gzipped).
 - `src/types.ts`: the five tabs, column by column (contract §10).
 - `src/data/source.ts`: the `SheetSource` interface, and `DemoSource`, its only
   implementation. A future live source must run behind a server the operator
@@ -70,10 +78,11 @@ time of the read. It never sees n8n, and says so where that matters.
   data contract; the console decides nothing the workflow has not decided.
   `decisionState` mirrors the core's rule (contract §10). It is used only to show
   what a decision cell says now, next to the `status` the last publish wrote.
-- `src/components/`: AppShell, StatusPill, Banner, Panel, Tile,
+- `src/components/`: AppShell, StatusPill, Banner, Panel, Figures, Drawer,
   DefinitionList, EmptyState, LedgerTable, StageTrack, Tabs, PageHead,
   RunBanner.
-- `src/pages/`: Overview, Runs and Run details, Review, Exceptions.
+- `src/pages/`: Overview, Runs and Run details, Review, Exceptions, Catalog,
+  Change history (`Changes.tsx`).
 - `src/styles/tokens.css`: the design tokens from the design canvas
   (version 19, "Triage"). Components use token names only.
 
@@ -102,9 +111,20 @@ time of the read. It never sees n8n, and says so where that matters.
 
 ## Differences from the version-19 design
 
-- **Fewer screens.** Incoming files, Catalog and Change history are not built;
-  the Overview has catalog and recent-change summaries instead. The nav shows
-  only built screens.
+- **Incoming files shows recorded files only.** The design lists the live inbox,
+  which needs a Drive read the sheet does not record. This screen lists file
+  versions named in the Run Log and Exceptions, says it is not the live inbox, and
+  shows the queue count only as what a past run recorded.
+- **Connection screen added.** Read-only: data mode, fixture use, verification
+  state and which capabilities need a future server. It has no controls.
+- **No violet.** The design makes "Outcome unknown" violet. The console limits status
+  colour to blue, green, amber, red and grey, so it is amber with a question-mark
+  icon and the words "Outcome unknown". It is never red and never called Failed.
+- **Quieter presentation than the design.** Status is a dot and a word, not a pill
+  with an icon. Content sits on one white canvas divided by rules, not in cards. The
+  sidebar has no icons. Run problems are compact summaries, with longer guidance in a
+  closed disclosure; safety information stays visible. Controls are 32 px tall with
+  a fine pointer above 960 px wide (44 px on touch and narrower screens).
 - **No approval dialog.** Review is read-only, with no Approve button or note
   field. The design's "decisions are locked" wording becomes "do not edit
   Review in the sheet"; the console has nothing to lock.
@@ -122,7 +142,9 @@ time of the read. It never sees n8n, and says so where that matters.
 ## Known limitations
 
 - Demo data only; the live data source and its server do not exist yet.
+- The live Drive inbox is not shown: files waiting in Drive are not recorded in the sheet.
 - jsdom tests do not check layout. Layout, contrast of rendered text, overflow
-  and keyboard order were checked in headless Chrome at 320, 375, 768 and
-  1280 px. No screen-reader pass has been done on this build.
+  and keyboard order were checked in headless Chrome at 320, 375, 768, 1280 and
+  1440 px. No screen-reader pass has been done on this build.
 - Focus moves to the page title after navigation, not on first load.
+- Table scroll regions stay a keyboard tab stop even when nothing overflows.

@@ -25,12 +25,14 @@ const TEXT: Array<[string, string]> = [
     (bg): Array<[string, string]> => [['color-text', bg], ['color-text-secondary', bg], ['color-text-tertiary', bg]]),
   // Links and accents
   ['color-accent', 'color-surface'], ['color-accent', 'color-bg'], ['color-accent', 'color-surface-muted'], ['color-accent', 'color-selected'],
-  ['color-accent-hover', 'color-surface'], ['color-accent-hover', 'color-accent-subtle'], ['color-on-accent', 'color-text'],
+  ['color-accent-hover', 'color-surface'], ['color-accent-hover', 'color-surface-sunken'], ['warning-text', 'color-surface-sunken'], ['color-accent-hover', 'color-accent-subtle'], ['color-on-accent', 'color-text'],
+  // Solid primary button, at rest, hovered and pressed
+  ['color-on-accent', 'color-accent'], ['color-on-accent', 'color-accent-hover'], ['color-on-accent', 'color-accent-pressed'],
   // Status text on its own tint, and on plain surfaces
-  ...['success', 'warning', 'danger', 'info', 'violet', 'neutral'].flatMap((t): Array<[string, string]> => [
+  ...['success', 'warning', 'danger', 'info', 'neutral'].flatMap((t): Array<[string, string]> => [
     [`${t}-text`, `${t}-bg`], [`${t}-text`, 'color-surface'], ['color-text', `${t}-bg`], ['color-text-secondary', `${t}-bg`],
   ]),
-  ['warning-text', 'color-selected'], ['color-accent', 'info-bg'], ['color-accent', 'danger-bg'], ['color-accent', 'violet-bg'],
+  ['warning-text', 'color-selected'], ['color-accent', 'info-bg'], ['color-accent', 'danger-bg'],
 ];
 
 const NON_TEXT: Array<[string, string]> = [
@@ -38,7 +40,7 @@ const NON_TEXT: Array<[string, string]> = [
   ['color-accent', 'color-selected'],
   // Stage nodes: the border carries the state alongside the written word
   ['success-dot', 'success-bg'], ['info-dot', 'color-surface'], ['danger-dot', 'danger-bg'], ['warning-dot', 'warning-bg'],
-  ['violet-dot', 'violet-bg'], ['neutral-dot', 'neutral-bg'],
+  ['neutral-dot', 'neutral-bg'],
 ];
 
 describe('token contrast', () => {

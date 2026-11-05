@@ -12,6 +12,8 @@ export type Route =
   | { page: 'exceptions' }
   | { page: 'catalog' }
   | { page: 'changes' }
+  | { page: 'incoming' }
+  | { page: 'connection' }
   | { page: 'not-found'; path: string };
 
 export interface Location {
@@ -34,6 +36,8 @@ export function parseHash(hash: string): Location {
   else if (parts[0] === 'exceptions' && parts.length === 1) route = { page: 'exceptions' };
   else if (parts[0] === 'catalog' && parts.length === 1) route = { page: 'catalog' };
   else if (parts[0] === 'changes' && parts.length === 1) route = { page: 'changes' };
+  else if (parts[0] === 'incoming' && parts.length === 1) route = { page: 'incoming' };
+  else if (parts[0] === 'connection' && parts.length === 1) route = { page: 'connection' };
   else route = { page: 'not-found', path };
   return { route, view, navigations: 0 };
 }

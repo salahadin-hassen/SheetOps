@@ -1,5 +1,6 @@
-import { useId, type ReactNode } from 'react';
-import { Icon, type IconName } from './Icon';
+import { useId, useLayoutEffect, useRef, type ReactNode } from 'react';
+import { Icon } from './Icon';
+import { PHONE, useMedia } from './useMedia';
 
 /** A card with a header. `flush` lets tables run edge to edge. */
 export function Panel({ title, aside, sub, children, level = 2, flush = false, foot, labelledBy }: {
@@ -30,6 +31,57 @@ export function Panel({ title, aside, sub, children, level = 2, flush = false, f
   );
 }
 
+/**
+ * Sets a <details> open or closed for the current width without taking control
+ * of it: the reader's own toggle stands until the breakpoint changes.
+ */
+function useResponsiveDetails() {
+  const phone = useMedia(PHONE);
+  const ref = useRef<HTMLDetailsElement>(null);
+  useLayoutEffect(() => {
+    if (ref.current) ref.current.open = !phone;
+  }, [phone]);
+  return ref;
+}
+
+/** A panel that starts collapsed on a phone, so long secondary detail stays one tap away. */
+export function CollapsiblePanel({ title, sub, flush = false, children }: { title: string; sub?: ReactNode; flush?: boolean; children: ReactNode }) {
+  const ref = useResponsiveDetails();
+  return (
+    <details ref={ref} className="card card-details">
+      <summary className="card-head">
+        <div>
+          <h2>{title}</h2>
+          {sub ? <div className="card-sub">{sub}</div> : null}
+        </div>
+        <Icon name="chevronRight" size={14} />
+      </summary>
+      <div className={`card-body${flush ? ' flush' : ''}`}>{children}</div>
+    </details>
+  );
+}
+
+/** Detail that stays one click away, without a box around it. */
+export function Disclosure({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <details className="disclosure">
+      <summary><Icon name="chevronRight" size={13} />{title}</summary>
+      {children}
+    </details>
+  );
+}
+
+/** Label and value rows: quiet figures for a side panel. */
+export function Figures({ items }: { items: Array<[string, ReactNode]> }) {
+  return (
+    <dl className="figures">
+      {items.map(([label, value]) => (
+        <div key={label}><dt>{label}</dt><dd className="num">{value}</dd></div>
+      ))}
+    </dl>
+  );
+}
+
 export function Stat({ label, value, note }: { label: string; value: number | string | null; note?: ReactNode }) {
   return (
     <div className="stat">
@@ -55,11 +107,10 @@ export function DefinitionList({ items }: { items: Array<[string, ReactNode]> })
   );
 }
 
-export function EmptyState({ title, children, level = 2, icon = 'inbox' }: { title: string; children?: ReactNode; level?: 2 | 3; icon?: IconName }) {
+export function EmptyState({ title, children, level = 2 }: { title: string; children?: ReactNode; level?: 2 | 3 }) {
   const Heading = level === 2 ? 'h2' : 'h3';
   return (
     <div className="empty">
-      <span className="empty-icon"><Icon name={icon} size={18} /></span>
       <Heading>{title}</Heading>
       {children ? <div className="muted">{children}</div> : null}
     </div>

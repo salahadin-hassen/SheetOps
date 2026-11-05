@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { modelOf, scenario, scenarios } from '../test/fixtures';
+import { readCatalog } from './catalog';
 import { decisionState, readReview } from './review';
 import { readRuns, rowAccounting, stagesFor, UNRESOLVED_AFTER_MINUTES } from './runs';
 import { explainRun } from './explain';
@@ -8,6 +9,30 @@ const words = (id: string, runId: string) => {
   const run = readRuns(scenario(id)).find((r) => r.id === runId)!;
   return stagesFor(run).map((s) => s.word);
 };
+
+describe('a decision that was not typed', () => {
+  it('shows the publish as not sent, and says a formula never approves', () => {
+    const snapshot = structuredClone(scenario('review-changed'));
+    const row = snapshot.tabs['Run Log'].find((r) => r.error_code === 'REVIEW_CHANGED')!;
+    row.error_code = 'REVIEW_DECISION_NOT_LITERAL';
+    const runs = readRuns(snapshot);
+    const run = runs.find((r) => r.row.error_code === 'REVIEW_DECISION_NOT_LITERAL')!;
+    expect(stagesFor(run).at(-1)!.word).toBe('Not sent');
+    expect(explainRun(run, runs).meaning).toContain('A formula never counts as an approval');
+  });
+});
+
+describe('catalog proposal note', () => {
+  it('names a price held together with a unit change, without calling the note committed', () => {
+    const snapshot = structuredClone(scenario('week2-published'));
+    const review = snapshot.tabs.Review.find((r) => r.reasons.includes('UNIT_CHANGED'))!;
+    review.proposed_price = Number(review.current_price) + 1;
+    const note = readCatalog(snapshot, null).find((i) => i.row.sku === review.sku)!.notes.find((n) => n.kind === 'proposal')!;
+    expect(note.text).toContain(`unit “${review.proposed_unit}”`);
+    expect(note.text).toContain((Number(review.current_price) + 1).toFixed(2));
+    expect(note.text).toMatch(/awaiting review|not applied yet/);
+  });
+});
 
 describe('demo data', () => {
   it('holds the seven generated scenarios, each with the five tabs', () => {

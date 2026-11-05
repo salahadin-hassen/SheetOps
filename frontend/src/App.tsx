@@ -8,7 +8,9 @@ import { formatDateTime } from './domain/format';
 import { buildModel, type ConsoleModel } from './domain/model';
 import { Catalog } from './pages/Catalog';
 import { Changes } from './pages/Changes';
+import { Connection } from './pages/Connection';
 import { Exceptions } from './pages/Exceptions';
+import { Incoming } from './pages/Incoming';
 import { Overview } from './pages/Overview';
 import { Review } from './pages/Review';
 import { RunDetails, RunsList } from './pages/Runs';
@@ -58,13 +60,13 @@ export function App({ source = demoSource }: { source?: SheetSource }) {
   return (
     <LinkContext.Provider value={link}>
       <NavigatedContext.Provider value={navigations > 0}>
-        <AppShell route={route} views={views} viewId={viewId} onViewChange={onViewChange} origin={source.origin}
+        <AppShell route={route} views={views} viewId={viewId} onViewChange={onViewChange}
           spreadsheetTitle={model?.snapshot.spreadsheetTitle ?? null}
           checkedAt={model ? formatDateTime(model.snapshot.checkedAt) : null} counts={counts}>
           {load.state === 'loading' ? (
             <div role="status" aria-live="polite">
               <span className="visually-hidden">Reading the sheet snapshot…</span>
-              <div className="skeleton" aria-hidden="true"><span style={{ width: '30%', height: 24 }} /><span style={{ width: '60%' }} /><span /><span /><span style={{ width: '80%' }} /></div>
+              <div className="skeleton" aria-hidden="true"><span style={{ width: '30%', height: 22 }} /><span style={{ width: '60%' }} /><span /><span /><span style={{ width: '80%' }} /></div>
             </div>
           ) : null}
           {load.state === 'error' ? (
@@ -76,14 +78,14 @@ export function App({ source = demoSource }: { source?: SheetSource }) {
               </Banner>
             </>
           ) : null}
-          {model ? <Screen route={route} model={model} /> : null}
+          {model ? <Screen route={route} model={model} source={source} scenario={views.find((v) => v.id === viewId)?.title ?? viewId} /> : null}
         </AppShell>
       </NavigatedContext.Provider>
     </LinkContext.Provider>
   );
 }
 
-function Screen({ route, model }: { route: Route; model: ConsoleModel }) {
+function Screen({ route, model, source, scenario }: { route: Route; model: ConsoleModel; source: SheetSource; scenario: string }) {
   switch (route.page) {
     case 'overview': return <Overview model={model} />;
     case 'runs': return <RunsList model={model} />;
@@ -92,6 +94,8 @@ function Screen({ route, model }: { route: Route; model: ConsoleModel }) {
     case 'exceptions': return <Exceptions model={model} />;
     case 'catalog': return <Catalog model={model} />;
     case 'changes': return <Changes model={model} />;
+    case 'incoming': return <Incoming model={model} />;
+    case 'connection': return <Connection model={model} mode={source.mode} origin={source.origin} scenario={scenario} />;
     default:
       return (
         <>

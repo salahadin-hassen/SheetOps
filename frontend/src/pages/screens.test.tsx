@@ -49,9 +49,13 @@ describe('REVIEW_CHANGED run details', () => {
 
   it('shows the blank counts as not recorded', async () => {
     await open('#/runs/1002?view=review-changed');
+    const panel = screen.getByRole('region', { name: 'Processing statistics' });
+    // Twelve blank cells are named in one line, not repeated as twelve rows;
+    // queue_remaining (0) is the one count a FAILED row records, and it stays a table row.
+    expect(text(panel)).toContain('12 counts not recorded: Accepted, Duplicate collapsed, Rejected, Held: conflicting rows, Held for review, Blank, Rows read, Changes applied, Reviews opened, Reviews pending, New exceptions, Exceptions in this batch.');
+    expect(text(panel)).toContain('blank means not recorded, not zero');
     const stats = screen.getByRole('region', { name: /Run 1002 counts/ });
-    // Twelve blank cells; queue_remaining (0) is the one count a FAILED row records.
-    expect(within(stats).getAllByText('Not recorded').length).toBe(12);
+    expect(within(stats).getAllByRole('rowheader').map((h) => h.textContent)).toEqual(['Files still in the queue']);
     const queue = within(stats).getByRole('rowheader', { name: 'Files still in the queue' }).closest('tr')!;
     expect(text(queue)).toBe('Files still in the queue0');
   });

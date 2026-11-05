@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { Note } from '../components/Banner';
 import { Drawer } from '../components/Drawer';
 import { ResultCount, SearchField } from '../components/Fields';
-import { Icon } from '../components/Icon';
 import { LedgerTable } from '../components/LedgerTable';
 import { DefinitionList, EmptyState } from '../components/Panel';
 import { PageHead } from '../components/PageHead';
@@ -40,7 +39,7 @@ export function Catalog({ model }: { model: ConsoleModel }) {
 
       {items.length === 0 ? (
         <section className="card" aria-label="Catalog">
-          <EmptyState title="The Catalog tab is empty" icon="box">
+          <EmptyState title="The Catalog tab is empty">
             The sheet has no catalog rows yet. SheetOps fills it from the first price list it publishes.
           </EmptyState>
         </section>
@@ -50,6 +49,7 @@ export function Catalog({ model }: { model: ConsoleModel }) {
             <div className="toolbar-left">
               <SearchField label="Find a product" value={query} onChange={setQuery} hint="SKU or product name" />
             </div>
+            <ResultCount>{`Showing ${visible.length} of ${items.length} products`}</ResultCount>
           </div>
 
           <Tabs<CatalogFilter> label="Filter" value={filter} onChange={setFilter} options={[
@@ -57,7 +57,7 @@ export function Catalog({ model }: { model: ConsoleModel }) {
             { key: 'ACTIVE', label: `Active · ${count('ACTIVE')}` },
             { key: 'DISCONTINUED', label: `Discontinued · ${count('DISCONTINUED')}` },
             { key: 'AWAITING_REVIEW', label: `Awaiting review · ${count('AWAITING_REVIEW')}` },
-            { key: 'ISSUES', label: `Issues in the latest list · ${count('ISSUES')}` },
+            { key: 'ISSUES', label: `Issues · ${count('ISSUES')}` },
           ]}>
             <section className="card" aria-labelledby="cat-title">
               <div className="card-head">
@@ -69,7 +69,6 @@ export function Catalog({ model }: { model: ConsoleModel }) {
                       : 'Starting catalog: no SheetOps run has published yet · sorted by SKU'}
                   </div>
                 </div>
-                <ResultCount>{`Showing ${visible.length} of ${items.length} products`}</ResultCount>
               </div>
               <LedgerTable<CatalogItem>
                 stack
@@ -77,42 +76,42 @@ export function Catalog({ model }: { model: ConsoleModel }) {
                 rows={visible}
                 rowKey={(i) => i.row.sku}
                 columns={[
-                  { header: 'SKU', rowHeader: true, cell: (i) => (
-                    <button type="button" className="row-button mono nowrap" aria-haspopup="dialog" onClick={() => setOpenSku(i.row.sku)}>{i.row.sku}</button>
+                  { header: 'SKU', rowHeader: true, phone: 'head', cell: (i) => (
+                    <button type="button" className="row-button mono sku nowrap" aria-haspopup="dialog" onClick={() => setOpenSku(i.row.sku)}>{i.row.sku}</button>
                   ) },
-                  { header: 'Product', cell: (i) => {
+                  { header: 'Product', phone: 'full', cell: (i) => {
                     const p = proposalOf(i);
                     return (
                       <>
-                        <span className="strong">{i.row.name}</span>
+                        <span className="product-name">{i.row.name}</span>
                         {i.notes.filter((n) => n.kind === 'applied').map((n) => <div key={n.text} className="cell-note note-applied">{n.text}</div>)}
                         {i.notes.filter((n) => n.kind === 'proposal' && !isPriceProposal(p)).map((n) => (
                           <div key={n.text} className="cell-note note-proposal"><span className={`proposed${p && decisionState(p.decision) === 'APPROVED' ? ' approved' : ''}`}>{n.text}</span></div>
                         ))}
                         {i.notes.filter((n) => n.kind === 'issue').map((n) => (
-                          <div key={n.text} className="cell-note note-issue"><a className="issue-link" href={href('/exceptions')}><Icon name="alert" size={12} />{n.text}</a></div>
+                          <div key={n.text} className="cell-note note-issue"><a className="issue-link" href={href('/exceptions')}><span className="dot amber" aria-hidden="true" />{n.text}</a></div>
                         ))}
                       </>
                     );
                   } },
-                  { header: 'Unit', cell: (i) => i.row.unit },
-                  { header: priceHeader, align: 'right', cell: (i) => {
+                  { header: 'Unit', phone: 'meta', cell: (i) => i.row.unit },
+                  { header: priceHeader, align: 'right', phone: 'end', cell: (i) => {
                     const p = proposalOf(i);
                     return (
                       <>
                         <span className="num strong price-committed">{formatPrice(i.row.unit_price)}{currencies.length > 1 ? ` ${i.row.currency}` : ''}</span>
                         {isPriceProposal(p) ? i.notes.filter((n) => n.kind === 'proposal').map((n) => (
-                          <div key={n.text} className="cell-note note-proposal"><span className={`proposed${decisionState(p!.decision) === 'APPROVED' ? ' approved' : ''}`}>{n.text}</span></div>
+                          <div key={n.text} className="cell-note note-proposal price-cell-note"><span className={`proposed${decisionState(p!.decision) === 'APPROVED' ? ' approved' : ''}`}>{n.text}</span></div>
                         )) : null}
                       </>
                     );
                   } },
-                  { header: 'Previous', align: 'right', cell: (i) => (isBlank(i.row.previous_price) ? <span className="subtle" aria-label="none">—</span> : <span className="num muted">{formatPrice(i.row.previous_price)}</span>) },
-                  { header: 'Status', cell: (i) => <StatusText tone={i.row.status === 'ACTIVE' ? 'green' : 'neutral'}>{statusWord(i.row.status)}</StatusText> },
-                  { header: 'Last changed', cell: (i) => <span className="nowrap">{formatDate(i.row.last_changed)}</span> },
-                  { header: 'Last seen', cell: (i) => <span className="nowrap">{formatDate(i.row.last_seen)}</span> },
+                  { header: 'Previous', align: 'right', phone: 'hide', cell: (i) => (isBlank(i.row.previous_price) ? <span className="subtle"><span aria-hidden="true">—</span><span className="visually-hidden">none</span></span> : <span className="num muted">{formatPrice(i.row.previous_price)}</span>) },
+                  { header: 'Status', phone: 'meta', cell: (i) => <StatusText tone={i.row.status === 'ACTIVE' ? 'green' : 'neutral'}>{statusWord(i.row.status)}</StatusText> },
+                  { header: 'Last changed', phone: 'hide', hideMedium: true, cell: (i) => <span className="nowrap">{formatDate(i.row.last_changed)}</span> },
+                  { header: 'Last seen', phone: 'hide', hideMedium: true, cell: (i) => <span className="nowrap">{formatDate(i.row.last_seen)}</span> },
                 ]}
-                empty={<EmptyState title="No products match" level={3} icon="search">Clear the search or choose another filter.</EmptyState>}
+                empty={<EmptyState title="No products match" level={3}>Clear the search or choose another filter.</EmptyState>}
               />
               <div className="card-foot">
                 Dates are price-list effective dates. “Previous” is the price before the last applied price change. Read {formatDateTime(model.snapshot.checkedAt)}.
@@ -162,9 +161,9 @@ function ProductDetail({ item, model, review }: { item: CatalogItem; model: Cons
         <section className="drawer-section" aria-labelledby="pd-review">
           <h3 id="pd-review">Held for review</h3>
           {review ? (
-            <div className="card plain">
-              <div className="card-body">
-                <div className="badge-row"><Pill tone={DECISION_CHIP[state!].tone}>{DECISION_CHIP[state!].label}</Pill></div>
+            <div className="held-box">
+              <div>
+                <div className="mb-2"><Pill tone={DECISION_CHIP[state!].tone}>{DECISION_CHIP[state!].label}</Pill></div>
                 <DefinitionList items={[
                   ['Proposed', [
                     review.proposed_name !== review.current_name ? `name “${review.proposed_name}”` : null,
@@ -173,7 +172,7 @@ function ProductDetail({ item, model, review }: { item: CatalogItem; model: Cons
                   ].filter(Boolean).join(', ') || '—'],
                   ['Not applied', 'The catalog keeps the committed values above until a published run applies the approval.'],
                 ]} />
-                <a className="small strong" href={href(`/review/${encodeURIComponent(r.sku)}`)}>Open in Review →</a>
+                <a className="small strong mt-2 inline-block" href={href(`/review/${encodeURIComponent(r.sku)}`)}>Open in Review</a>
               </div>
             </div>
           ) : <p className="small muted">Review ID {r.pending_review} is not in the Review tab.</p>}
@@ -198,14 +197,14 @@ function ProductDetail({ item, model, review }: { item: CatalogItem; model: Cons
             })}
           </ol>
         )}
-        <a className="small strong" href={href('/changes')}>Change history →</a>
+        <a className="small strong" href={href('/changes')}>Open change history</a>
       </section>
 
       {r.last_issue ? (
         <section className="drawer-section" aria-labelledby="pd-issues">
           <h3 id="pd-issues">Issues in the latest list</h3>
-          <p className="small"><span className="mono">{r.last_issue}</span></p>
-          <a className="small strong" href={href('/exceptions')}>Exceptions →</a>
+          <p className="small mono-wrap"><span className="mono">{r.last_issue}</span></p>
+          <a className="small strong" href={href('/exceptions')}>Open exceptions</a>
         </section>
       ) : null}
     </>

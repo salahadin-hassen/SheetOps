@@ -115,7 +115,9 @@ describe('overview latest-run summary', () => {
     await open('#/?view=review-changed');
     const latest = screen.getByRole('region', { name: 'Latest run' });
     expect(within(latest).getByRole('heading', { level: 2 }).textContent).toBe('Run 1002 · Failed');
-    expect(within(latest).getAllByText('Not recorded').length).toBe(5);
+    // One sentence instead of five "Not recorded" tiles; blank is still never zero.
+    expect(text(latest)).toContain('A failed run leaves its counts blank in the Run Log: not recorded, not zero.');
+    expect(latest.querySelectorAll('.stat')).toHaveLength(0);
     expect(text(latest)).toContain('The catalog is as run 1001 published it.');
     expect(within(screen.getByRole('region', { name: 'Last committed run' })).getByRole('heading', { level: 2 }).textContent)
       .toBe('Run 1001 · Published with exceptions');

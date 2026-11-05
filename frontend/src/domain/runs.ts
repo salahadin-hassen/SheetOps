@@ -21,7 +21,7 @@ export type RunKind =
   | 'blocked'
   | 'unrecognised';
 
-export type Tone = 'blue' | 'green' | 'violet' | 'red' | 'amber' | 'neutral';
+export type Tone = 'blue' | 'green' | 'red' | 'amber' | 'neutral';
 
 export interface Run {
   id: string;
@@ -67,7 +67,7 @@ export function readRuns(snapshot: SheetSnapshot): Run[] {
 
 export const STATUS_LABEL: Record<RunKind, { label: string; tone: Tone }> = {
   started: { label: 'Started · no result yet', tone: 'blue' },
-  unresolved: { label: 'Outcome unknown', tone: 'violet' },
+  unresolved: { label: 'Outcome unknown', tone: 'amber' },
   published: { label: 'Published', tone: 'green' },
   published_exceptions: { label: 'Published with exceptions', tone: 'green' },
   rejected: { label: 'File rejected', tone: 'neutral' },
@@ -122,6 +122,7 @@ const FAILED_AT: Record<string, number> = {
   PUBLISH_TOO_LARGE: 3,
   REVIEW_CHANGED: 4,
   REVIEW_READ_FAILED: 4,
+  REVIEW_DECISION_NOT_LITERAL: 4,
   PUBLISH_REJECTED: 4,
 };
 
@@ -158,7 +159,7 @@ export function stagesFor(run: Run): Stage[] {
     case 'failed': {
       const at = FAILED_AT[code] ?? 4;
       let word = 'Failed';
-      if (code === 'REVIEW_CHANGED' || code === 'REVIEW_READ_FAILED') word = 'Not sent';
+      if (code === 'REVIEW_CHANGED' || code === 'REVIEW_READ_FAILED' || code === 'REVIEW_DECISION_NOT_LITERAL') word = 'Not sent';
       if (code === 'PUBLISH_REJECTED') {
         const status = httpStatus(run.row.error_message);
         word = status ? `Refused (${status})` : 'Refused';

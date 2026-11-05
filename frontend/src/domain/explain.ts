@@ -100,6 +100,13 @@ function explainFailure(run: Run, runs: Run[], code: string): RunExplanation {
       operator: `Check that the Review tab can be read, then process the list again. ${again}`,
     };
   }
+  if (code === 'REVIEW_DECISION_NOT_LITERAL') {
+    return {
+      title: 'Failed · a Review decision was not typed',
+      meaning: 'Definitive: a decision cell held a formula, or a value an array formula put there, so the publish was never sent. A formula never counts as an approval. Nothing was applied, and the cell was not changed.',
+      operator: `Replace that decision cell with typed text, then process the list again. ${again}`,
+    };
+  }
   if (code === 'PUBLISH_REJECTED') {
     return {
       title: 'Failed · refused by Google',
@@ -157,6 +164,7 @@ const SUGGESTION: Record<string, string> = {
   NOT_A_CSV_FILE: 'Download it as CSV and upload the CSV instead.',
   FILE_TOO_LARGE: 'Split or trim the file below the size limit.',
   CSV_PARSE_ERROR: 'The file is not valid CSV. Export it again from the source.',
+  INVALID_ENCODING: 'The file is not valid UTF-8, and SheetOps never guesses another encoding. Save it as CSV UTF-8 and upload it again.',
   FILE_EMPTY: 'The file has no data rows. Upload the complete list.',
   TOO_MANY_ROWS: 'The list is above the row limit. Split it or ask for a smaller list.',
   MISSING_COLUMN: 'A required column is missing. Check the header row.',
@@ -190,6 +198,7 @@ export const EXCEPTION_TITLE: Record<string, string> = {
   NOT_A_CSV_FILE: 'File is not a CSV',
   FILE_TOO_LARGE: 'File is too large',
   CSV_PARSE_ERROR: 'File is not valid CSV',
+  INVALID_ENCODING: 'File is not valid UTF-8',
   FILE_EMPTY: 'File has no data rows',
   TOO_MANY_ROWS: 'File has too many rows',
   MISSING_COLUMN: 'A required column is missing',

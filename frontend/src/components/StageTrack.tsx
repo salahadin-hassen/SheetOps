@@ -21,7 +21,7 @@ export function StageTrack({ stages, label }: { stages: Stage[]; label: string }
       {stages.map((s, i) => (
         <li key={s.name} className={`stage ${s.state}`}>
           <span className="stage-rail" aria-hidden="true">
-            <span className="stage-node"><Icon name={ICON[s.state]} size={12} /></span>
+            <span className="stage-node"><Icon name={ICON[s.state]} size={11} /></span>
             <span className="stage-line" />
           </span>
           <span className="stage-name">{i + 1} · {s.name}</span>
@@ -32,16 +32,12 @@ export function StageTrack({ stages, label }: { stages: Stage[]; label: string }
   );
 }
 
-export function StageLegend() {
-  const items: Array<[StageState, string]> = [
-    ['done', 'Done'], ['pending', 'No result yet'], ['not-in-sheet', 'Not in the sheet (dashed)'],
-    ['not-reached', 'Not reached'], ['unknown', 'Unknown'], ['failed', 'Failed or not sent'],
-  ];
+/** Only the one marking that the written stage word does not already explain. */
+export function StageLegend({ stages }: { stages: Stage[] }) {
+  if (!stages.some((s) => s.state === 'not-in-sheet')) return null;
   return (
-    <ul className="legend" aria-label="Stage legend">
-      {items.map(([state, text]) => (
-        <li key={state}><Icon name={ICON[state]} size={12} />{text}</li>
-      ))}
-    </ul>
+    <p className="xsmall subtle">
+      A dashed stage leaves no record in the sheet until the publish, so the sheet cannot show what happened there.
+    </p>
   );
 }

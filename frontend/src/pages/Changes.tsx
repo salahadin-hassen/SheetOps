@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Note } from '../components/Banner';
 import { ResultCount, SearchField, SelectField } from '../components/Fields';
+import { Icon } from '../components/Icon';
 import { LedgerTable } from '../components/LedgerTable';
 import { EmptyState } from '../components/Panel';
 import { PageHead } from '../components/PageHead';
@@ -12,7 +13,7 @@ import { cellText, formatDate, formatDateTime } from '../domain/format';
 import { CHANGE_TYPE, changePct, type ConsoleModel } from '../domain/model';
 import { useHref } from '../router';
 import type { ChangeRow } from '../types';
-import { BeforeAfter } from './Overview';
+import { BeforeAfter, ChangePct } from './Overview';
 
 type DispositionFilter = 'ALL' | (typeof DISPOSITION_ORDER)[number];
 
@@ -21,7 +22,7 @@ export function Disposition({ value }: { value: string }) {
   const d = DISPOSITION[value] ?? { label: value, tone: 'neutral' as const };
   return value === 'APPLIED' || value === 'APPLIED_AFTER_REVIEW'
     ? <StatusText tone={d.tone}>{d.label}</StatusText>
-    : <Pill tone={d.tone} icon={value === 'HELD_FOR_REVIEW' ? 'pause' : 'dash'}>{d.label}</Pill>;
+    : <Pill tone={d.tone}>{d.label}</Pill>;
 }
 
 export function Changes({ model }: { model: ConsoleModel }) {
@@ -48,7 +49,7 @@ export function Changes({ model }: { model: ConsoleModel }) {
 
       {batches.length === 0 ? (
         <section className="card" aria-label="Change history">
-          <EmptyState title="No changes recorded yet" icon="history">
+          <EmptyState title="No changes recorded yet">
             The Changes tab is empty. Rows appear only when a run that changes the catalog, or holds a change for review, is published.
             {model.lastCommitted ? null : ' No SheetOps run has published to this sheet yet.'}
           </EmptyState>
@@ -69,21 +70,26 @@ export function Changes({ model }: { model: ConsoleModel }) {
             { key: 'ALL', label: `All · ${listRows.length}` },
             ...DISPOSITION_ORDER.filter((d) => counts[d]).map((d) => ({ key: d, label: `${DISPOSITION[d].label} · ${counts[d]}` })),
           ]}>
-            <ResultCount>{`Showing ${shownCount} of ${listRows.length} changes`}</ResultCount>
+            <div className="toolbar">
+              <ResultCount>{`Showing ${shownCount} of ${listRows.length} changes`}</ResultCount>
+              <details className="disclosure bare legend-disclosure">
+                <summary><Icon name="chevronRight" size={13} />What the dispositions mean</summary>
+                <dl className="deflist" aria-label="Dispositions">
+                  {DISPOSITION_ORDER.map((d) => (
+                    <div key={d} className="contents"><dt>{DISPOSITION[d].label}</dt><dd>{DISPOSITION[d].meaning}</dd></div>
+                  ))}
+                </dl>
+              </details>
+            </div>
             {shownCount === 0 ? (
               <section className="card" aria-label="No matching changes">
-                <EmptyState title="No changes match" level={2} icon="search">Clear the search or choose another disposition or list.</EmptyState>
+                <EmptyState title="No changes match" level={2}>Clear the search or choose another disposition or list.</EmptyState>
               </section>
             ) : shown.filter((b) => b.rows.length > 0).map((b) => (
               <BatchSection key={b.batchId} batch={b} total={batches.find((x) => x.batchId === b.batchId)!.rows} productOf={productOf} model={model} />
             ))}
           </Tabs>
 
-          <ul className="legend" aria-label="Dispositions">
-            {DISPOSITION_ORDER.map((d) => (
-              <li key={d}><Disposition value={d} /> <span>{DISPOSITION[d].meaning}</span></li>
-            ))}
-          </ul>
           <Note>
             An approval alone never appears here: a row exists only if the publish that wrote it was committed, because history,
             catalog and run status are written in one request. Source rows that were rejected are not changes; they are listed
@@ -111,14 +117,14 @@ function BatchSection({ batch, total, productOf, model }: {
       <div className="card-head">
         <div className="minw-0">
           <h2 id={headingId}>{title}</h2>
-          <div className="card-sub">
+          <div className="card-sub mono-wrap">
             {batch.run ? <><span className="mono">{batch.run.row.source_name}</span> · published {formatDateTime(batch.run.row.finished_at)} · </> : null}
-            batch <span className="mono mono-wrap">{batch.batchId}</span>
+            batch <span className="mono">{batch.batchId}</span>
           </div>
         </div>
         <div className="page-actions">
           {batch.run ? <RunStatusPill run={batch.run} /> : null}
-          {batch.run ? <a className="small strong" href={href(`/runs/${batch.run.id}`)}>Run details</a> : null}
+          {batch.run ? <a className="small strong nowrap" href={href(`/runs/${batch.run.id}`)}>Run details</a> : null}
         </div>
       </div>
       <LedgerTable<ChangeRow>
@@ -128,18 +134,19 @@ function BatchSection({ batch, total, productOf, model }: {
         rowKey={(r) => r.event_id}
         expandLabel={(r) => `${r.sku} ${CHANGE_TYPE[r.change_type] ?? r.change_type}`}
         columns={[
-          { header: 'SKU', rowHeader: true, cell: (r) => <span className="mono nowrap">{r.sku}</span> },
-          { header: 'Product', cell: (r) => productOf(r) || <span className="subtle">—</span> },
-          { header: 'Change', cell: (r) => CHANGE_TYPE[r.change_type] ?? r.change_type },
-          { header: 'Disposition', cell: (r) => <Disposition value={r.disposition} /> },
-          { header: 'Before → after', cell: (r) => <BeforeAfter row={r} /> },
-          { header: 'Change %', align: 'right', cell: (r) => <span className="num">{changePct(r)}</span> },
+          { header: 'SKU', rowHeader: true, phone: 'head', cell: (r) => <span className="mono sku nowrap">{r.sku}</span> },
+          { header: 'Product', phone: 'full', cell: (r) => productOf(r) || <span className="subtle">—</span> },
+          { header: 'Change', phone: 'meta', cell: (r) => CHANGE_TYPE[r.change_type] ?? r.change_type },
+          { header: 'Disposition', phone: 'end', cell: (r) => <Disposition value={r.disposition} /> },
+          { header: 'Before → after', phone: 'full', cell: (r) => <BeforeAfter row={r} /> },
+          { header: 'Change %', align: 'right', phone: 'meta', hideMedium: true, cell: (r) => <ChangePct row={r} /> },
         ]}
         expand={(r) => (
           <dl className="inline-dl">
             <dt>Event ID</dt><dd className="mono">{r.event_id}</dd>
             {r.review_id ? <><dt>Review ID</dt><dd className="mono">{r.review_id}</dd></> : null}
             <dt>Effective date</dt><dd>{formatDate(r.effective_date)}</dd>
+            <dt>Change %</dt><dd className="num">{changePct(r)}</dd>
             <dt>Note</dt><dd>{cellText(r.note) || <span className="subtle">None</span>}</dd>
             {r.disposition === 'HELD_FOR_REVIEW' ? (
               <><dt>Where it is now</dt><dd>{heldStatus(r, model.snapshot)} <a href={href(`/review/${encodeURIComponent(r.sku)}`)}>Open in Review</a></dd></>
